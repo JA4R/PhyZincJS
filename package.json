@@ -1,0 +1,45 @@
+{
+  "name": "phyzincjs",
+  "version": "0.0.1",
+  "description": "Extension to ZincJS",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && vite build",
+    "serve": "vite --port 7000 --host",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JA4R/PhyZincJS.git"
+  },
+  "keywords": [
+    "3D",
+    "physics"
+  ],
+  "author": "Alan Wu",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JA4R/PhyZincJS/issues"
+  },
+  "homepage": "https://github.com/JA4R/PhyZincJS#readme",
+  "devDependencies": {
+    "@babel/core": "^7.23.9",
+    "@babel/preset-env": "^7.23.9",
+    "auto-changelog": "^2.4.0",
+    "babel-loader": "^9.1.3",
+    "babel-preset-minify": "^0.5.1",
+    "better-docs": "^2.7.3",
+    "eslint": "^8.57.0",
+    "file-loader": "^6.2.0",
+    "jsdoc": "^4.0.2",
+    "raw-loader": "^4.0.2",
+    "vite": "^5.1.5",
+    "vite-plugin-top-level-await": "^1.4.1",
+    "vite-plugin-wasm": "^3.3.0",
+    "vitest": "^1.3.1"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d": "^0.12.0",
+    "zincjs": "^1.5.0-beta.0"
+  }
+}
