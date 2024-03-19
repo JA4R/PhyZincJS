@@ -56,7 +56,6 @@ const PhyZinc = function() {
                 color: new THREE.Color("rgb(255, 215, 0)")
             });
             //geometry.translate(position[0], position[1], position[2]);
-            console.log(geometry)
             const zincObject = this.addGeometry(geometry, material, "balls");
             if (zincObject) {
                 const world = this.getPhysicsWorld();
@@ -69,6 +68,34 @@ const PhyZinc = function() {
                     .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
                     // .setTranslation(0, 0, 0)
                     .setRestitution(0.6)
+                    .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
+                this.addPhysics(zincObject, true, true, false, collider, rigidBody);
+            }
+            return zincObject;
+        } else {
+            console.error("Physics engine is not ready yet.");
+        }
+    }
+
+    this.addBox = (position, dimension) => {
+        if (this.rapier) {
+            const geometry = new THREE.BoxGeometry(...dimension);
+            const material = new THREE.MeshPhongMaterial({
+                color: new THREE.Color("rgb(0, 0, 200)")
+            });
+            //geometry.translate(position[0], position[1], position[2]);
+            const zincObject = this.addGeometry(geometry, material, "box");
+            if (zincObject) {
+                const world = this.getPhysicsWorld();
+                const rbDesc = this.rapier.RigidBodyDesc.dynamic()
+                    .setTranslation(position[0], position[1], position[2])
+                    .setLinearDamping(0.1);
+                const rigidBody = world.createRigidBody(rbDesc);
+                const collider = this.rapier.ColliderDesc
+                    .cuboid(dimension[0] / 2, dimension[1] / 2, dimension[2] / 2)
+                    .setFriction(0.1)
+                    .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
+                    .setRestitution(0.2)
                     .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
                 this.addPhysics(zincObject, true, true, false, collider, rigidBody);
             }
