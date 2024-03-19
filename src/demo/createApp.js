@@ -1,4 +1,3 @@
-import './index.css';
 import Zinc from "zincjs";
 import { PhyZinc } from "../phyZinc.js"
 
@@ -39,12 +38,11 @@ const addBoxes = (phyZinc, dimension, counts, area, position) => {
   }
 }
 
-export async function createApp() {
+export async function startScene(mount) {
   const phyZinc = new PhyZinc();
   await phyZinc.initialise();
   console.log("Initialised rapier")
-  const renderElt = document.getElementById('root');
-  const renderer = new Zinc.Renderer(renderElt, window);
+  const renderer = new Zinc.Renderer(mount, window);
   Zinc.defaultMaterialColor = 0xFFFF9C;
   phyZinc.attach(renderer);
   phyZinc.startNewScene("test");
