@@ -80,6 +80,24 @@ const addBoxes = (phyZinc, dimension, counts, area, position) => {
   }
 }
 
+const addWalls = (phyZinc, floorPosition, floorDimension, wallHeight) => {
+  const halfX = floorDimension[0] / 2;
+  const halfY = floorDimension[1] / 2;
+  const wallZ = floorPosition[2] + wallHeight / 2;
+
+  // North/South walls: perpendicular to Y, spanning the floor's X edge
+  phyZinc.addFloor([floorPosition[0], floorPosition[1] + halfY, wallZ],
+    [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
+  phyZinc.addFloor([floorPosition[0], floorPosition[1] - halfY, wallZ],
+    [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
+
+  // East/West walls: perpendicular to X, spanning the floor's Y edge
+  phyZinc.addFloor([floorPosition[0] + halfX, floorPosition[1], wallZ],
+    [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
+  phyZinc.addFloor([floorPosition[0] - halfX, floorPosition[1], wallZ],
+    [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
+}
+
 const gltfObjectAdded = (phyZinc, objectsByGroupName) => {
   return function(zincObject) {
     const morph = zincObject.getMorph();
@@ -117,8 +135,9 @@ const loadGLTF = (phyZinc) => {
   const dimension = [2.5, 2.5];
   const position = [0, 0, -1.5];
   phyZinc.addFloor(position, /*dimenstion*/dimension);
-  //addSpheres(phyZinc, /*radius*/0.03, [5, 5], [1.25, 1.25], position);
-  //addBoxes(phyZinc, [0.06, 0.06, 0.06], [5, 5], [1.25, 1.25], [0, 0, 1.0]);
+  addWalls(phyZinc, position, dimension, /*wallHeight*/1.5);
+  addSpheres(phyZinc, /*radius*/0.03, [5, 5], [1.25, 1.25], position);
+  addBoxes(phyZinc, [0.06, 0.06, 0.06], [5, 5], [1.25, 1.25], [0, 0, 1.0]);
   const gltfURL = `${import.meta.env.BASE_URL}dummy_body.glb`;
   const objectsByGroupName = new Map();
   phyZinc.addObjectAddedCallback(gltfObjectAdded(phyZinc, objectsByGroupName));
@@ -146,7 +165,6 @@ export async function startScene(mount, gravity) {
   await phyZinc.attach(renderer);
   phyZinc.startNewScene("test");
   phyZinc.setGravity(gravity);
-  //loadMetadata(phyZinc);
   loadGLTF(phyZinc);
   return phyZinc;
 }

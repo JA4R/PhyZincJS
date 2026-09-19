@@ -80,7 +80,7 @@ const PhyZinc = function() {
     this.addSphere = (position, radius, widthSegments, heightSegments) => {
         if (this.rapier) {
             const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
-            const material = new THREE.MeshPhongMaterial({
+            const material = new THREE.MeshPhongNodeMaterial({
                 color: new THREE.Color("rgb(255, 215, 0)")
             });
             //geometry.translate(position[0], position[1], position[2]);
@@ -109,7 +109,7 @@ const PhyZinc = function() {
     this.addBox = (position, dimension) => {
         if (this.rapier) {
             const geometry = new THREE.BoxGeometry(...dimension);
-            const material = new THREE.MeshPhongMaterial({
+            const material = new THREE.MeshPhongNodeMaterial({
                 color: new THREE.Color("rgb(0, 0, 200)")
             });
             //geometry.translate(position[0], position[1], position[2]);
@@ -135,12 +135,20 @@ const PhyZinc = function() {
         }
     }
 
-    this.addFloor = (position, dimension) => {
+    this.addFloor = (position, dimension, rotation) => {
         if (this.rapier) {
             const geometry = new THREE.PlaneGeometry(dimension[0], dimension[1]);
-            const material = new THREE.MeshPhongMaterial({
-                color: new THREE.Color("rgb(124, 252, 0)")
+            const material = new THREE.MeshPhongNodeMaterial({
+                color: new THREE.Color("rgb(124, 252, 0)"),
+                opacity: 0.5,
+                transparent: true,
+
             });
+            if (rotation) {
+                geometry.rotateX(rotation[0]);
+                geometry.rotateY(rotation[1]);
+                geometry.rotateZ(rotation[2]);
+            }
             geometry.translate(position[0], position[1], position[2]);
             const zincObject = this.addGeometry(geometry, material, "floor");
             const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
