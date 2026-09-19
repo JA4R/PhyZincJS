@@ -119,7 +119,7 @@ const loadGLTF = (phyZinc) => {
   phyZinc.addFloor(position, /*dimenstion*/dimension);
   //addSpheres(phyZinc, /*radius*/0.03, [5, 5], [1.25, 1.25], position);
   //addBoxes(phyZinc, [0.06, 0.06, 0.06], [5, 5], [1.25, 1.25], [0, 0, 1.0]);
-  const gltfURL = "/dummy_body.glb";
+  const gltfURL = `${import.meta.env.BASE_URL}dummy_body.glb`;
   const objectsByGroupName = new Map();
   phyZinc.addObjectAddedCallback(gltfObjectAdded(phyZinc, objectsByGroupName));
   phyZinc.addDownloadCompletedCallback(createRagdollJoints(phyZinc, objectsByGroupName));
@@ -132,7 +132,7 @@ const loadMetadata = (phyZinc) => {
   phyZinc.addFloor(position, /*dimenstion*/dimension);
   addSpheres(phyZinc, /*radius*/30, [5, 5], [500, 500], position);
   addBoxes(phyZinc, [60, 60, 60], [5, 5], [450, 450], [0, 0, -250]);
-  const metaURL = "/body_metadata.json"
+  const metaURL = `${import.meta.env.BASE_URL}body_metadata.json`
   phyZinc.importZincMetadata(metaURL);
 } 
 

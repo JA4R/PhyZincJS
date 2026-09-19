@@ -1,0 +1,15 @@
+[
+  {
+    "GroupName": "skin_epidermis",
+    "MorphColours": false,
+    "MorphNormals": false,
+    "MorphVertices": false,
+    "RegionPath": "skin",
+    "Type": "Surfaces",
+    "URL": "human_body_1789.json"
+  },
+  {
+    "Type": "View",
+    "URL": "human_body_Layout1_view.json"
+  }
+]
