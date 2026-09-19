@@ -18,12 +18,23 @@ const PhysicsOptions = function( dynamic, translation, rotation,
     };
 }
 
+const JointOptions = function( type, axis, limits, anchor, contactsEnabled) {
+    return {
+        type,
+        axis,
+        limits,
+        anchor,
+        contactsEnabled
+    };
+}
+
 const PhyZinc = function() {
     this.rapier = undefined;
     this.renderer = undefined;
     this.physicsWorld = undefined;
     let gravity = -9.81;
     const objects = [];
+    const joints = [];
     const addedObjectCallbacks = [];
     const downloadCompletedCallbacks = [];
     let paused = false;
@@ -140,6 +151,34 @@ const PhyZinc = function() {
         }
     } 
 
+    const createDynamicCollider = (vertices, indices) => {
+        let collider = this.rapier.ColliderDesc.convexHull(vertices);
+        if (!collider) {
+            console.warn("convexHull failed (degenerate geometry), falling back to trimesh collider");
+            collider = this.rapier.ColliderDesc.trimesh(vertices, indices);
+        }
+        return collider;
+    }
+
+    const computeJointAnchor = (objectA, objectB) => {
+        const boxOf = (zincObject) => {
+            const geometry = zincObject.getMorph().geometry;
+            if (!geometry.boundingBox) {
+                geometry.computeBoundingBox();
+            }
+            return geometry.boundingBox;
+        }
+        const boxA = boxOf(objectA);
+        const boxB = boxOf(objectB);
+        const overlap = boxA.clone().intersect(boxB);
+        if (!overlap.isEmpty()) {
+            return overlap.getCenter(new THREE.Vector3());
+        }
+        const centerA = boxA.getCenter(new THREE.Vector3());
+        const centerB = boxB.getCenter(new THREE.Vector3());
+        return centerA.add(centerB).multiplyScalar(0.5);
+    }
+
     this.addPhysicsToObject = (zincObject, options) => {
         if (this.rapier) {
             if (zincObject && zincObject.isGeometry) {
@@ -149,8 +188,9 @@ const PhyZinc = function() {
                 const indices = geometry.index.array;
                 try {
                     const world = this.getPhysicsWorld();
-                    let collider = options.collider ? 
-                        options.collider : this.rapier.ColliderDesc.trimesh(vertices, indices);
+                    let collider = options.collider ? options.collider
+                        : options.dynamic ? createDynamicCollider(vertices, indices)
+                        : this.rapier.ColliderDesc.trimesh(vertices, indices);
                     collider.setContactSkin(options.contactSkin);
                     zincObject.collider = collider;
                     let rigidBody = options.rigidBody;
@@ -179,21 +219,34 @@ const PhyZinc = function() {
         }
     }
 
+    this.addJoint = (objectA, objectB, options) => {
+        if (this.rapier && objectA && objectB && objectA.rigidBody && objectB.rigidBody) {
+            const world = this.getPhysicsWorld();
+            const anchor = options.anchor ? options.anchor : computeJointAnchor(objectA, objectB);
+            const jointData = options.type === "revolute" ?
+                this.rapier.JointData.revolute(anchor, anchor,
+                    new THREE.Vector3(options.axis[0], options.axis[1], options.axis[2])) :
+                this.rapier.JointData.spherical(anchor, anchor);
+            const joint = world.createImpulseJoint(
+                jointData, objectA.rigidBody, objectB.rigidBody, true);
+            if (options.type === "revolute" && options.limits) {
+                joint.setLimits(options.limits[0], options.limits[1]);
+            }
+            joint.setContactsEnabled(
+                options.contactsEnabled === undefined ? false : options.contactsEnabled);
+            joints.push(joint);
+            return joint;
+        } else {
+            console.error("unable to add joint between zincObjects");
+        }
+    }
+
     const objectAddedCallback = () => {
         return (zincObject) => {
             if (!zincObject.isPhyZincsObject) {
                 addedObjectCallbacks.forEach(callback => {
                     callback(zincObject);
                 })
-                const options = PhysicsOptions(true, true, true, undefined, undefined, 0.1, 0.01);
-                //test codes 
-                if (zincObject.groupName === "Left_Thigh" ||
-                    zincObject.groupName === "Torso") {
-                    this.addPhysicsToObject(zincObject, options);
-                }
-                
-                //original
-                //this.addPhysicsToObject(zincObject, options);
             }
         }
     }
@@ -308,4 +361,4 @@ const PhyZinc = function() {
     }
 }
 
-export { PhyZinc };
+export { PhyZinc, PhysicsOptions, JointOptions };
