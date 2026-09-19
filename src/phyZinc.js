@@ -5,12 +5,28 @@ const THREE = Zinc.THREE;
 //    return this;
 //}
 
+const PhysicsOptions = function( dynamic, translation, rotation,
+    collider, rigidBody, softCcdPrediction, contactSkin) {
+    return {
+        dynamic,
+        translation,
+        rotation,
+        collider,
+        rigidBody,
+        softCcdPrediction,
+        contactSkin
+    };
+}
+
 const PhyZinc = function() {
     this.rapier = undefined;
     this.renderer = undefined;
     this.physicsWorld = undefined;
     let gravity = -9.81;
     const objects = [];
+    const addedObjectCallbacks = [];
+    const downloadCompletedCallbacks = [];
+    let paused = false;
 
     this.setGravity = g => {
         gravity = g;
@@ -18,8 +34,8 @@ const PhyZinc = function() {
 
     this.getPhysicsWorld = () => {
         if (!this.physicsWorld) {
-            gravity = new THREE.Vector3(0.0, 0.0, gravity);
-            this.physicsWorld = new this.rapier.World(gravity);
+            let gravityIn = new THREE.Vector3(0.0, 0.0, gravity);
+            this.physicsWorld = new this.rapier.World(gravityIn);
         }
         return this.physicsWorld;
     }
@@ -45,6 +61,7 @@ const PhyZinc = function() {
 
             }
         );
+        zincObject.isPhyZincsObject = true;
         scene.addZincObject(zincObject);
         return zincObject;
     }
@@ -69,7 +86,8 @@ const PhyZinc = function() {
                     // .setTranslation(0, 0, 0)
                     .setRestitution(0.6)
                     .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
-                this.addPhysics(zincObject, true, true, false, collider, rigidBody);
+                const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
+                this.addPhysicsToObject(zincObject, options);
             }
             return zincObject;
         } else {
@@ -97,7 +115,8 @@ const PhyZinc = function() {
                     .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
                     .setRestitution(0.2)
                     .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
-                this.addPhysics(zincObject, true, true, false, collider, rigidBody);
+                const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
+                this.addPhysicsToObject(zincObject, options);
             }
             return zincObject;
         } else {
@@ -113,15 +132,15 @@ const PhyZinc = function() {
             });
             geometry.translate(position[0], position[1], position[2]);
             const zincObject = this.addGeometry(geometry, material, "floor");
-            this.addPhysics(zincObject, false, false, false, undefined, undefined);
+            const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
+            this.addPhysicsToObject(zincObject, options);
             return zincObject;
         } else {
             console.error("Physics engine is not ready yet.");
         }
     } 
 
-    this.addPhysics = (zincObject, dynamic, translation, rotation,
-        colliderIn, rigidBodyIn) => {
+    this.addPhysicsToObject = (zincObject, options) => {
         if (this.rapier) {
             if (zincObject && zincObject.isGeometry) {
                 const morph = zincObject.getMorph();
@@ -130,24 +149,27 @@ const PhyZinc = function() {
                 const indices = geometry.index.array;
                 try {
                     const world = this.getPhysicsWorld();
-                    let collider = colliderIn ? 
-                        colliderIn : this.rapier.ColliderDesc.trimesh(vertices, indices);
+                    let collider = options.collider ? 
+                        options.collider : this.rapier.ColliderDesc.trimesh(vertices, indices);
+                    collider.setContactSkin(options.contactSkin);
                     zincObject.collider = collider;
-                    let rigidBody = rigidBodyIn;
-                    if (dynamic) {
+                    let rigidBody = options.rigidBody;
+                    if (options.dynamic) {
                         zincObject.getMorph().matrixAutoUpdate = true;
                         zincObject.rigidBody = rigidBody ? 
                             rigidBody : world.createRigidBody(
                                 this.rapier.RigidBodyDesc.dynamic());
                     } else {
-                        zincObject.rigidBody = rigidBody?
+                        zincObject.rigidBody = rigidBody ?
                             rigidBody: world.createRigidBody(
                                 this.rapier.RigidBodyDesc.fixed());
                     }
+                    zincObject.rigidBody.setSoftCcdPrediction(
+                        options.softCcdPrediction);
                     zincObject.worldCollider = world.createCollider(
                         zincObject.collider, zincObject.rigidBody);
-                    zincObject.physicsT = translation;
-                    zincObject.physicsR = rotation;
+                    zincObject.physicsT = options.translation;
+                    zincObject.physicsR = options.rotation;
                     objects.push(zincObject);
                 }
                 catch {
@@ -156,25 +178,55 @@ const PhyZinc = function() {
             }
         }
     }
-    
+
     const objectAddedCallback = () => {
         return (zincObject) => {
-            console.log(zincObject.getBoundingBox())
-            this.addPhysics(zincObject, true, true, true, undefined, undefined);
+            if (!zincObject.isPhyZincsObject) {
+                addedObjectCallbacks.forEach(callback => {
+                    callback(zincObject);
+                })
+                const options = PhysicsOptions(true, true, true, undefined, undefined, 0.1, 0.01);
+                //test codes 
+                if (zincObject.groupName === "Left_Thigh" ||
+                    zincObject.groupName === "Torso") {
+                    this.addPhysicsToObject(zincObject, options);
+                }
+                
+                //original
+                //this.addPhysicsToObject(zincObject, options);
+            }
         }
     }
-      
+
+    this.addObjectAddedCallback = (callback) => {
+        if (callback && (typeof callback === "function")) {
+            addedObjectCallbacks.push(callback);
+        }
+    }
+
+    this.addDownloadCompletedCallback = (callback) => {
+        if (callback && (typeof callback === "function")) {
+            downloadCompletedCallbacks.push(callback);
+        }
+    }
+
     const downloadCompletedCallback = () => {
         return () => {
+            downloadCompletedCallbacks.forEach(callback => {
+                callback();
+            })
             this.renderer.addPreRenderCallbackFunction(updatePhysicalWorld());
             this.renderer.playAnimation = true;
             this.renderer.animate();
+            const scene = this.renderer.getCurrentScene();
+            console.log(scene.getBoundingBox());
+            scene.viewAll();
         }
     }
 
     const updatePhysicalWorld = () => {
         return () => {
-            if (this.physicsWorld) {
+            if (this.physicsWorld && !paused) {
                 this.physicsWorld.step();
                 objects.forEach(target => {
                     if (target.isZincObject) {
@@ -193,18 +245,27 @@ const PhyZinc = function() {
         }
     }
 
+    this.pause = (flag) => {
+        paused = flag;
+    }
+
+    this.isPaused = () => {
+        return paused;
+    }
+
     this.startNewScene = sceneName => {
         if (this.renderer) {
             const scene = this.renderer.createScene(sceneName);
+            scene.addZincObjectAddedCallbacks(objectAddedCallback());
             this.renderer.setCurrentScene(scene);
         }
     }
-      
+
     this.importZincMetadata = (url) => {
         if (this.isReady()) {
             if (this.renderer) {
                 const scene = this.renderer.getCurrentScene();
-                scene.loadMetadataURL(url, objectAddedCallback(),
+                scene.loadMetadataURL(url, undefined,
                     downloadCompletedCallback());
             }
         } else {
@@ -212,16 +273,39 @@ const PhyZinc = function() {
         }
     }
 
-    this.attach = (renderer) => {
+    this.loadGLTF = (url) => {
+        if (this.isReady()) {
+            if (this.renderer) {
+                const scene = this.renderer.getCurrentScene();
+                scene.loadGLTF(url, undefined, downloadCompletedCallback());
+            }
+        } else {
+            console.error("Physics engine is not ready yet.")
+        }
+    }
+
+    this.attach = async (renderer) => {
         this.renderer = renderer;
-        this.renderer.initialiseVisualisation();
+        await this.renderer.initialiseVisualisation();
         this.renderer.playAnimation = false;
     }
 
     this.isReady = () => {
         return this.rapier !== undefined;
     }
-}
 
+    this.dispose = () => {
+        this.zincObjects.forEach(object => {
+            delete zincObject.worldCollider;
+        });
+        if (this.physicsWorld) {
+            delete this.physicsWorld;
+            this.physicsWorld = undefined;
+        }
+        if (this.renderer) {
+            this.renderer.dispose();
+        }
+    }
+}
 
 export { PhyZinc };

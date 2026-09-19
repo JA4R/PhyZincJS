@@ -38,15 +38,33 @@ const addBoxes = (phyZinc, dimension, counts, area, position) => {
   }
 }
 
-export async function startScene(mount) {
-  const phyZinc = new PhyZinc();
-  await phyZinc.initialise();
-  console.log("Initialised rapier")
-  const renderer = new Zinc.Renderer(mount, window);
-  Zinc.defaultMaterialColor = 0xFFFF9C;
-  phyZinc.attach(renderer);
-  phyZinc.startNewScene("test");
-  phyZinc.setGravity(-9810);
+const gltfObjectAdded = () => {
+  return function(zincObject) {
+    const morph = zincObject.getMorph();
+    console.log(zincObject.groupName)
+    const scale = morph.scale;
+    const geometry = morph.geometry;
+    geometry.scale(scale.x, scale.y, scale.z)
+    scale.set(1, 1, 1);
+    morph.quaternion.set(0, 0, 0, 1);
+    geometry.rotateX( Math.PI / 2);
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+  }
+}
+
+const loadGLTF = (phyZinc) => {
+  const dimension = [2.5, 2.5];
+  const position = [0, 0, -1.5];
+  phyZinc.addFloor(position, /*dimenstion*/dimension);
+  //addSpheres(phyZinc, /*radius*/0.03, [5, 5], [1.25, 1.25], position);
+  //addBoxes(phyZinc, [0.06, 0.06, 0.06], [5, 5], [1.25, 1.25], [0, 0, 1.0]);
+  const gltfURL = "/dummy_body.glb";
+  phyZinc.addObjectAddedCallback(gltfObjectAdded());
+  phyZinc.loadGLTF(gltfURL);
+}
+
+const loadMetadata = (phyZinc) => {
   const dimension = [2000, 2000];
   const position = [0, 0, -500];
   phyZinc.addFloor(position, /*dimenstion*/dimension);
@@ -54,5 +72,19 @@ export async function startScene(mount) {
   addBoxes(phyZinc, [60, 60, 60], [5, 5], [450, 450], [0, 0, -250]);
   const metaURL = "/body_metadata.json"
   phyZinc.importZincMetadata(metaURL);
-  return renderer;
+} 
+
+export async function startScene(mount, gravity) {
+  const phyZinc = new PhyZinc();
+  await phyZinc.initialise();
+  phyZinc.pause(true);
+  console.log("Initialised rapier")
+  const renderer = new Zinc.Renderer(mount, window);
+  Zinc.defaultMaterialColor = 0xFFFF9C;
+  await phyZinc.attach(renderer);
+  phyZinc.startNewScene("test");
+  phyZinc.setGravity(gravity);
+  //loadMetadata(phyZinc);
+  loadGLTF(phyZinc);
+  return phyZinc;
 }
