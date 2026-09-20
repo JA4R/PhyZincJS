@@ -1,4 +1,4 @@
-import { useImperativeHandle, forwardRef, useState, useRef, useEffect, Ref } from 'react';
+import { useImperativeHandle, forwardRef, useState, useRef, useEffect } from 'react';
 import { startScene } from './createApp.js';
 import Box from '@mui/material/Box';
 
@@ -6,7 +6,12 @@ type Props = {
   gravity: number;
 };
 
-const Scene = forwardRef((props: Props, ref: Ref) => {
+export type SceneHandle = {
+  restart: (gravity?: number) => void;
+  pause: () => void;
+};
+
+const Scene = forwardRef<SceneHandle, Props>((props, ref) => {
   const mountRef = useRef(null);
   const [phyZinc, setPhyZinc] = useState<any>(null);
 
@@ -15,9 +20,9 @@ const Scene = forwardRef((props: Props, ref: Ref) => {
     pause,
   }));
 
-  const restart = () => {
+  const restart = (gravity?: number) => {
     dispose();
-    initialise(mountRef, props);
+    initialise(mountRef, gravity === undefined ? props : { ...props, gravity });
   }
 
   const pause = () => {
@@ -25,8 +30,9 @@ const Scene = forwardRef((props: Props, ref: Ref) => {
   }
 
   const dispose = () => {
-    const renderer = phyZinc.renderer.getThreeJSRenderer();
-    mountRef.current.removeChild(renderer.domElement);  
+    const domElement = phyZinc.renderer.getThreeJSRenderer().domElement;
+    phyZinc.dispose();
+    mountRef.current.removeChild(domElement);
   }
 
   const initialise = async (mountRef, props) => {

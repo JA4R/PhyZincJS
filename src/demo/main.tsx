@@ -1,76 +1,66 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { ThemeProvider } from '@emotion/react';
-import { CssBaseline } from '@mui/material';
-import { styled } from '@mui/system';
-import Button from '@mui/material/Button';
-import Input from '@mui/material/Input';
+import CssBaseline from '@mui/material/CssBaseline';
 import theme from './theme.tsx';
-import Scene from './Scene.tsx';
+import Scene, { SceneHandle } from './Scene.tsx';
+import ControlPanel from './ControlPanel.tsx';
 
-let gravity = 9.81;
-const sceneRef = React.createRef();
+const DEFAULT_GRAVITY = 9.81;
+const GRAVITY_SCALE = 0.1;
 
-const restart = () => {
-  sceneRef.current.restart()
-}
+const createRandomString = () => (Math.random() + 1).toString(36).substring(7);
 
-const pause = () => {
-  sceneRef.current.pause()
-}
+const App = () => {
+  const sceneRef = React.useRef<SceneHandle>(null);
+  const [sceneKey] = React.useState(createRandomString);
+  const [paused, setPaused] = React.useState(true);
+  const gravityRef = React.useRef(DEFAULT_GRAVITY);
 
-const createRandomString = () => {
-  return (Math.random() + 1).toString(36).substring(7);
-}
+  const handleGravityChange = (value: string) => {
+    const parsed = Number(value);
+    if (!Number.isNaN(parsed)) {
+      gravityRef.current = parsed;
+    }
+  };
 
-let sceneKey = createRandomString();
+  const handleRestart = () => {
+    sceneRef.current?.restart(-gravityRef.current * GRAVITY_SCALE);
+    setPaused(true);
+  };
 
-const GravityInput = styled(Input)(
-  ({ theme }) => ({
-    position: "relative",
-    zIndex: 1,
-    color: theme.palette.secondary.main,
-    width: "auto"
-  })
-);
+  const handlePauseToggle = () => {
+    sceneRef.current?.pause();
+    setPaused((prev) => !prev);
+  };
 
-const setGravity = (value: String) => {
-  gravity = Number(value);
-}
-
-const gravityChange = (e: Event) => {
-  setGravity(e.target.value);
-}
-
-const gravityPress = (e) => {
-  if(e.keyCode == 13){
-    gravityPress(e);
-     // put the login here
-  }
-}
-
-
-const ConfirmButton = styled(Button)(
-  ({ theme }) => ({
-    backgroundColor: theme.palette.primary.main,
-    position: "relative",
-    zIndex: 1,
-  })
-);
-
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
+  return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <div style={{position: "absolute",}}>
-        <GravityInput
-          defaultValue="9.81"
-          onKeyDown={gravityPress}
-          onChange={gravityChange}
-        />
-        <ConfirmButton onClick={restart}>Restart</ConfirmButton>
-        <ConfirmButton onClick={pause}>Pause</ConfirmButton>
-      </div>
-      <Scene gravity={-(9.81) * 0.1} key={sceneKey} ref={sceneRef}/>
-    </ThemeProvider>,
-);
+      <ControlPanel
+        title="Simulation"
+        fields={[
+          {
+            key: 'gravity',
+            label: 'Gravity',
+            defaultValue: String(DEFAULT_GRAVITY),
+            helperText: 'Applies on Restart',
+            onChange: handleGravityChange,
+          },
+        ]}
+        actions={[
+          { key: 'restart', label: 'Restart', onClick: handleRestart },
+          {
+            key: 'pause',
+            label: paused ? 'Resume' : 'Pause',
+            onClick: handlePauseToggle,
+            variant: 'outlined',
+          },
+        ]}
+      />
+      <Scene gravity={-DEFAULT_GRAVITY * GRAVITY_SCALE} key={sceneKey} ref={sceneRef} />
+    </ThemeProvider>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')!).render(<App />);

@@ -356,13 +356,12 @@ const PhyZinc = function() {
     }
 
     this.dispose = () => {
-        this.zincObjects.forEach(object => {
-            delete zincObject.worldCollider;
+        objects.forEach(object => {
+            delete object.worldCollider;
         });
-        if (this.physicsWorld) {
-            delete this.physicsWorld;
-            this.physicsWorld = undefined;
-        }
+        objects.length = 0;
+        joints.length = 0;
+        this.physicsWorld = undefined;
         if (this.renderer) {
             this.renderer.dispose();
         }
