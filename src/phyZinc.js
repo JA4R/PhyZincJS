@@ -1,9 +1,7 @@
 import { getRapier } from './physics/rapier';
 import Zinc from "zincjs";
 const THREE = Zinc.THREE;
-//const RAPIER  = function() {
-//    return this;
-//}
+
 
 const PhysicsOptions = function( dynamic, translation, rotation,
     collider, rigidBody, softCcdPrediction, contactSkin) {
@@ -38,6 +36,8 @@ const PhyZinc = function() {
     const addedObjectCallbacks = [];
     const downloadCompletedCallbacks = [];
     let paused = false;
+    let dragState = null;
+    let dragListenersAttached = false;
 
     this.setGravity = g => {
         gravity = g;
@@ -271,6 +271,102 @@ const PhyZinc = function() {
         }
     }
 
+    const _pickingCallback = function() {
+		return function(intersects, window_x, window_y) {
+
+        }
+    }
+
+    const _hoverCallback = function() {
+		return function(intersects, window_x, window_y) {
+
+
+        }
+    }
+
+    const pickDraggableObject = (scene, zincCameraControl, raycaster, mouse, event) => {
+        zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
+        raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
+        const hits = raycaster.intersectObjects(scene.getPickableThreeJSObjects(), true);
+        return hits.find(hit =>
+            hit.object?.userData?.isZincObject &&
+            hit.object.userData.rigidBody?.bodyType() === this.rapier.RigidBodyType.Dynamic);
+    }
+
+    this.enableDragging = () => {
+        if (!this.renderer || dragListenersAttached) return;
+        dragListenersAttached = true;
+
+        const domElement = this.renderer.getThreeJSRenderer().domElement;
+        const scene = this.renderer.getCurrentScene();
+        const zincCameraControl = scene.getZincCameraControls();
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const currentPoint = new THREE.Vector3();
+
+        const onMouseDown = (event) => {
+            const hit = pickDraggableObject(scene, zincCameraControl, raycaster, mouse, event);
+            if (!hit) return;
+
+            const zincObject = hit.object.userData;
+            const rigidBody = zincObject.rigidBody;
+
+            zincCameraControl.disable();
+
+            const grabPoint = hit.point.clone();
+            const cameraDirection = new THREE.Vector3();
+            zincCameraControl.cameraObject.getWorldDirection(cameraDirection);
+            const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+                cameraDirection, grabPoint);
+            const t = rigidBody.translation();
+
+            dragState = {
+                rigidBody,
+                originalBodyType: rigidBody.bodyType(),
+                grabPoint,
+                dragPlane,
+                startTranslation: new THREE.Vector3(t.x, t.y, t.z),
+                lastPoint: grabPoint.clone(),
+                lastTime: performance.now(),
+                velocity: new THREE.Vector3(),
+            };
+            rigidBody.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
+        }
+
+        const onMouseMove = (event) => {
+            if (!dragState) return;
+
+            zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
+            raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
+            if (!raycaster.ray.intersectPlane(dragState.dragPlane, currentPoint)) return;
+
+            const newPosition = dragState.startTranslation.clone()
+                .add(currentPoint).sub(dragState.grabPoint);
+
+            const now = performance.now();
+            const dt = Math.max((now - dragState.lastTime) / 1000, 1e-4);
+            dragState.velocity.copy(currentPoint).sub(dragState.lastPoint).divideScalar(dt);
+            dragState.lastPoint.copy(currentPoint);
+            dragState.lastTime = now;
+
+            dragState.rigidBody.setNextKinematicTranslation(newPosition);
+        }
+
+        const onMouseUp = () => {
+            if (dragState) {
+                dragState.rigidBody.setBodyType(dragState.originalBodyType, true);
+                dragState.rigidBody.setLinvel(dragState.velocity, true);
+                dragState = null;
+            }
+            zincCameraControl.enable();
+        }
+
+        domElement.addEventListener('mousedown', onMouseDown);
+        domElement.addEventListener('mousemove', onMouseMove);
+        domElement.addEventListener('mouseup', onMouseUp);
+        domElement.addEventListener('mouseleave', onMouseUp);
+    }
+
     const downloadCompletedCallback = () => {
         return () => {
             downloadCompletedCallbacks.forEach(callback => {
@@ -280,6 +376,9 @@ const PhyZinc = function() {
             this.renderer.playAnimation = true;
             this.renderer.animate();
             const scene = this.renderer.getCurrentScene();
+            const zincCameraControl = scene.getZincCameraControls();
+			//zincCameraControl.enableRaycaster(scene, _pickingCallback(), _hoverCallback());
+            this.enableDragging();
             console.log(scene.getBoundingBox());
             scene.viewAll();
         }
