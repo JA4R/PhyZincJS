@@ -77,6 +77,16 @@ const PhyZinc = function() {
         return zincObject;
     }
 
+    this.addMesh = (mesh, name) => {
+        const scene = this.renderer.getCurrentScene();
+        const zincObject = new Zinc.Geometry();
+        zincObject.setName(name);
+        zincObject.setMesh(mesh, false, false);
+        zincObject.isPhyZincsObject = true;
+        scene.addZincObject(zincObject);
+        return zincObject;
+    }
+
     this.addSphere = (position, radius, widthSegments, heightSegments) => {
         if (this.rapier) {
             const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
@@ -379,7 +389,6 @@ const PhyZinc = function() {
             const zincCameraControl = scene.getZincCameraControls();
 			//zincCameraControl.enableRaycaster(scene, _pickingCallback(), _hoverCallback());
             this.enableDragging();
-            console.log(scene.getBoundingBox());
             scene.viewAll();
         }
     }
@@ -418,6 +427,7 @@ const PhyZinc = function() {
             const scene = this.renderer.createScene(sceneName);
             scene.addZincObjectAddedCallbacks(objectAddedCallback());
             this.renderer.setCurrentScene(scene);
+            return scene;
         }
     }
 

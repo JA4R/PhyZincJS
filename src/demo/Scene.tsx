@@ -1,5 +1,5 @@
 import { useImperativeHandle, forwardRef, useState, useRef, useEffect } from 'react';
-import { startScene } from './createApp.js';
+import { startScene, startClothScene } from './createApp.js';
 import Box from '@mui/material/Box';
 
 type Props = {
@@ -36,15 +36,14 @@ const Scene = forwardRef<SceneHandle, Props>((props, ref) => {
   }
 
   const initialise = async (mountRef, props) => {
-    const obj = await startScene(mountRef.current, props.gravity);
+    //const obj = await startScene(mountRef.current, props.gravity);
+    const obj = await startClothScene(mountRef.current);
     setPhyZinc(obj);
   };
 
   useEffect(() => {
 
     initialise(mountRef, props);
-
-    console.log(mountRef)
 
     return () => {
       dispose();

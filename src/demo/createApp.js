@@ -1,5 +1,6 @@
 import Zinc from "zincjs";
 import { PhyZinc, PhysicsOptions, JointOptions } from "../phyZinc.js"
+import { createClothPatch, ClothOptions } from "../physics/pbdCloth.js"
 
 const ENABLED_GROUPS = [
   'Left_Shin',
@@ -154,6 +155,44 @@ const loadMetadata = (phyZinc) => {
   const metaURL = `${import.meta.env.BASE_URL}body_metadata.json`
   phyZinc.importZincMetadata(metaURL);
 } 
+
+// WebGPU PBD cloth-patch proof of concept — self-contained, no Rapier/physics
+// dependency. Never calls phyZinc.initialise() (which loads the Rapier WASM
+// module), only PhyZinc's generic rendering setup (attach/startNewScene/addMesh).
+export async function startClothScene(mount) {
+  const phyZinc = new PhyZinc();
+  const renderer = new Zinc.Renderer(mount, window);
+  Zinc.defaultMaterialColor = 0xFFFF9C;
+  await phyZinc.attach(renderer);
+  const scene = phyZinc.startNewScene("cloth");
+  const clothOptions = ClothOptions(20, 20, 0.1, [0, 0, 0]);
+  const cloth = await createClothPatch(renderer, clothOptions);
+  // +Y is the curtain's normal (it hangs in the XZ plane), blowing it away
+  // from the camera, which sits on -Y.
+  cloth.setWind([0, 6, 0], 0.8);
+  phyZinc.addMesh(cloth.mesh, "cloth");
+  renderer.addPreRenderCallbackFunction(cloth.step);
+  renderer.playAnimation = true;
+  renderer.animate();
+
+  // The patch is Y-thin (a hanging curtain in the XZ plane), so point the
+  // camera along Y explicitly rather than relying on viewAll()'s default
+  // angle, which isn't guaranteed to face a flat patch head-on.
+  const { gridWidth, gridHeight, spacing, origin } = clothOptions;
+  const center = [
+    origin[0] + (gridWidth - 1) * spacing / 2,
+    origin[1],
+    origin[2] - (gridHeight - 1) * spacing / 2,
+  ];
+  const distance = Math.max(gridWidth, gridHeight) * spacing * 1.5;
+  scene.getZincCameraControls().setCurrentCameraSettings({
+    eyePosition: [center[0], center[1] - distance, center[2]],
+    targetPosition: center,
+    upVector: [0, 0, 1],
+  });
+
+  return { phyZinc, cloth };
+}
 
 export async function startScene(mount, gravity) {
   const phyZinc = new PhyZinc();
