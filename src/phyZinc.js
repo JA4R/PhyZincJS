@@ -229,7 +229,25 @@ const PhyZinc = function() {
         } else {
             console.error("Physics engine is not ready yet.");
         }
-    } 
+    }
+
+    this.addWalls = (floorPosition, floorDimension, wallHeight) => {
+        const halfX = floorDimension[0] / 2;
+        const halfY = floorDimension[1] / 2;
+        const wallZ = floorPosition[2] + wallHeight / 2;
+
+        // North/South walls: perpendicular to Y, spanning the floor's X edge
+        this.addFloor([floorPosition[0], floorPosition[1] + halfY, wallZ],
+            [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
+        this.addFloor([floorPosition[0], floorPosition[1] - halfY, wallZ],
+            [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
+
+        // East/West walls: perpendicular to X, spanning the floor's Y edge
+        this.addFloor([floorPosition[0] + halfX, floorPosition[1], wallZ],
+            [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
+        this.addFloor([floorPosition[0] - halfX, floorPosition[1], wallZ],
+            [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
+    }
 
     const createDynamicCollider = (vertices, indices) => {
         let collider = this.rapier.ColliderDesc.convexHull(vertices);
