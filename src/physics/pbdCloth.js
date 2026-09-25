@@ -100,11 +100,12 @@ const RELAXATION = 0.2;
 // each particle keeps its own copy of λ for each of its constraints and only
 // ever writes its own slot — race-free, no atomics. `valid` masks neighbors
 // past the grid edge (index falls back to self, contribution forced to 0).
+// invMassOf(index) returns a particle's effective inverse mass node.
 // Returns { dLambda, correction } nodes.
-const xpbdConstraint = (i, selfPos, selfInvMass, readBuf, invMass, valid, neighborIndex,
+const xpbdConstraint = (i, selfPos, selfInvMass, readBuf, invMassOf, valid, neighborIndex,
     restLen, lambda, alphaTilde) => {
     const index = valid.select(neighborIndex, i);
-    const neighborInvMass = invMass.element(index);
+    const neighborInvMass = invMassOf(index);
     const diff = selfPos.sub(readBuf.element(index));
     const len = diff.length().max(1e-5);
     const constraint = len.sub(restLen);
@@ -182,6 +183,13 @@ async function createClothPatch(renderer, options) {
     // α̃ = α / dt² (time-step-scaled compliance), precomputed on the CPU.
     const stretchAlphaTildeU = uniform(stretchCompliance / (dt * dt), 'float');
     const bendAlphaTildeU = uniform(bendCompliance / (dt * dt), 'float');
+    // Index of the particle held by the mouse (-1 = none) and where it's held.
+    const grabIndexU = uniform(-1, 'int');
+    const grabTargetU = uniform(new THREE.Vector3());
+    // Effective inverse mass: a grabbed particle is treated as pinned, so its
+    // neighbours are pulled towards it and nothing pulls it back.
+    const invMassOf = (index) =>
+        select(index.equal(grabIndexU), float(0.0), invMass.element(index));
     const colliderCountU = uniform(0, 'int');
     const thicknessU = uniform(collisionThickness, 'float');
     const frictionU = uniform(friction, 'float');
@@ -246,7 +254,7 @@ async function createClothPatch(renderer, options) {
         const i = instanceIndex.toInt();
         const col = i.mod(gridWidthU);
         const row = i.div(gridWidthU);
-        const selfInvMass = invMass.element(i);
+        const selfInvMass = invMassOf(i);
         const vel = velocity.element(i).toVar();
 
         // Surface normal from central differences over grid neighbours (clamped
@@ -277,20 +285,21 @@ async function createClothPatch(renderer, options) {
         // XPBD: λ accumulates over one timestep's iterations, reset every step.
         lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
         lambdaBending.element(i).assign(vec4(0, 0, 0, 0));
-        positionScratchA.element(i).assign(positionSettled.element(i).add(vel.mul(dtU)));
+        const predicted = positionSettled.element(i).add(vel.mul(dtU));
+        positionScratchA.element(i).assign(select(i.equal(grabIndexU), grabTargetU, predicted));
     })().compute(particleCount);
 
     const buildSolveKernel = (readBuf, writeBuf) => Fn(() => {
         const i = instanceIndex.toInt();
         const col = i.mod(gridWidthU);
         const row = i.div(gridWidthU);
-        const selfInvMass = invMass.element(i);
+        const selfInvMass = invMassOf(i);
         const selfPos = readBuf.element(i).toVar();
         const structLambda = lambdaStructural.element(i).toVar();
         const bendLambda = lambdaBending.element(i).toVar();
 
         const solve = (valid, neighborIndex, restLen, lambda, alphaTilde) =>
-            xpbdConstraint(i, selfPos, selfInvMass, readBuf, invMass, valid, neighborIndex,
+            xpbdConstraint(i, selfPos, selfInvMass, readBuf, invMassOf, valid, neighborIndex,
                 restLen, lambda, alphaTilde);
 
         // structural (adjacent grid neighbors): λ slots x=left y=right z=up w=down
@@ -384,9 +393,57 @@ async function createClothPatch(renderer, options) {
     // compute reads from it.
     await renderer.getThreeJSRenderer().computeAsync(initKernel);
 
+    // CPU copy of the particle positions, used only for mouse picking. Read
+    // back from the GPU at most once in flight, so it lags 1-2 frames behind.
+    // three.js pads vec3 storage to vec4, so particle i is at [4i, 4i + 3).
+    let pickSnapshot = null;
+    let readbackPending = false;
+    const refreshPickSnapshot = () => {
+        if (readbackPending) return;
+        readbackPending = true;
+        renderer.getThreeJSRenderer().getArrayBufferAsync(positionSettled.value)
+            .then(buffer => { pickSnapshot = new Float32Array(buffer); })
+            .catch(() => {})
+            .finally(() => { readbackPending = false; });
+    }
+
     const step = () => {
         timeU.value += dt;
         renderer.getThreeJSRenderer().compute(frameNodes);
+        refreshPickSnapshot();
+    }
+
+    // ray: THREE.Ray in world space. Returns the particle within one grid
+    // spacing of the ray that is nearest the camera, as { index, point,
+    // distance } (distance along the ray), or null.
+    const pickPoint = new THREE.Vector3();
+    const pick = (ray) => {
+        if (!pickSnapshot) return null;
+        const maxDistanceSq = spacing * spacing;
+        let best = null;
+        for (let i = 0; i < particleCount; i++) {
+            pickPoint.fromArray(pickSnapshot, i * 4);
+            const along = pickPoint.clone().sub(ray.origin).dot(ray.direction);
+            if (along < 0 || ray.distanceSqToPoint(pickPoint) > maxDistanceSq) continue;
+            if (!best || along < best.distance) {
+                best = { index: i, point: pickPoint.clone(), distance: along };
+            }
+        }
+        return best;
+    }
+
+    const grab = (hit) => {
+        grabIndexU.value = hit.index;
+        grabTargetU.value.copy(hit.point);
+    }
+
+    const moveGrab = (point) => {
+        grabTargetU.value.copy(point);
+    }
+
+    // The particle keeps the velocity it was dragged with, so it can be thrown.
+    const release = () => {
+        grabIndexU.value = -1;
     }
 
     // direction/strength as one vector ([x, y, z], world units per second²
@@ -434,7 +491,10 @@ async function createClothPatch(renderer, options) {
         material.dispose();
     }
 
-    return { mesh, step, setWind, setCompliance, setColliders, dispose };
+    return {
+        mesh, step, setWind, setCompliance, setColliders,
+        pick, grab, moveGrab, release, dispose
+    };
 }
 
 export { createClothPatch, ClothOptions };

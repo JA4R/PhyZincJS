@@ -38,7 +38,9 @@ const PhyZinc = function() {
     const objects = [];
     const joints = [];
     // Simulated objects stepped alongside Rapier, e.g. a pbdCloth patch:
-    // { mesh, step(), setColliders?(shapes), dispose?() }.
+    // { mesh, step(), setColliders?(shapes), dispose?() }, plus optionally for
+    // mouse dragging: pick(ray) -> { point, distance, ... } | null,
+    // grab(hit), moveGrab(point), release().
     const deformables = [];
     let simulationStarted = false;
     const addedObjectCallbacks = [];
@@ -374,9 +376,12 @@ const PhyZinc = function() {
         }
     }
 
+    // Casts a ray under the mouse (leaving it in raycaster.ray) and returns the
+    // nearest dynamic rigid body hit, if any.
     const pickDraggableObject = (scene, zincCameraControl, raycaster, mouse, event) => {
         zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
         raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
+        if (!this.rapier) return undefined;
         const hits = raycaster.intersectObjects(scene.getPickableThreeJSObjects(), true);
         return hits.find(hit =>
             hit.object?.userData?.isZincObject &&
@@ -384,7 +389,7 @@ const PhyZinc = function() {
     }
 
     this.enableDragging = () => {
-        if (!this.renderer || !this.rapier || dragListenersAttached) return;
+        if (!this.renderer || dragListenersAttached) return;
         dragListenersAttached = true;
 
         const domElement = this.renderer.getThreeJSRenderer().domElement;
@@ -395,32 +400,51 @@ const PhyZinc = function() {
         const currentPoint = new THREE.Vector3();
 
         const onMouseDown = (event) => {
-            const hit = pickDraggableObject(scene, zincCameraControl, raycaster, mouse, event);
-            if (!hit) return;
+            const rigidHit = pickDraggableObject(scene, zincCameraControl, raycaster, mouse, event);
 
-            const zincObject = hit.object.userData;
-            const rigidBody = zincObject.rigidBody;
+            // Deformables aren't raycastable meshes, so each picks itself; the
+            // candidate nearest the camera (rigid or deformable) wins.
+            let deformableHit = null;
+            let hitDeformable = null;
+            deformables.forEach(deformable => {
+                const hit = deformable.pick?.(raycaster.ray);
+                if (hit && (!deformableHit || hit.distance < deformableHit.distance)) {
+                    deformableHit = hit;
+                    hitDeformable = deformable;
+                }
+            });
+            const useDeformable = deformableHit &&
+                (!rigidHit || deformableHit.distance < rigidHit.distance);
+            if (!useDeformable && !rigidHit) return;
 
             zincCameraControl.disable();
 
-            const grabPoint = hit.point.clone();
+            const grabPoint = (useDeformable ? deformableHit.point : rigidHit.point).clone();
             const cameraDirection = new THREE.Vector3();
             zincCameraControl.cameraObject.getWorldDirection(cameraDirection);
             const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
                 cameraDirection, grabPoint);
-            const t = rigidBody.translation();
 
             dragState = {
-                rigidBody,
-                originalBodyType: rigidBody.bodyType(),
                 grabPoint,
                 dragPlane,
-                startTranslation: new THREE.Vector3(t.x, t.y, t.z),
                 lastPoint: grabPoint.clone(),
                 lastTime: performance.now(),
                 velocity: new THREE.Vector3(),
             };
-            rigidBody.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
+
+            if (useDeformable) {
+                dragState.deformable = hitDeformable;
+                dragState.startTranslation = grabPoint.clone();
+                hitDeformable.grab(deformableHit);
+            } else {
+                const rigidBody = rigidHit.object.userData.rigidBody;
+                const t = rigidBody.translation();
+                dragState.rigidBody = rigidBody;
+                dragState.originalBodyType = rigidBody.bodyType();
+                dragState.startTranslation = new THREE.Vector3(t.x, t.y, t.z);
+                rigidBody.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
+            }
         }
 
         const onMouseMove = (event) => {
@@ -439,19 +463,32 @@ const PhyZinc = function() {
             dragState.lastPoint.copy(currentPoint);
             dragState.lastTime = now;
 
-            dragState.rigidBody.setNextKinematicTranslation(newPosition);
+            if (dragState.deformable) {
+                dragState.deformable.moveGrab(newPosition);
+            } else {
+                dragState.rigidBody.setNextKinematicTranslation(newPosition);
+            }
         }
 
         const onMouseUp = () => {
             if (dragState) {
-                dragState.rigidBody.setBodyType(dragState.originalBodyType, true);
-                dragState.rigidBody.setLinvel(dragState.velocity, true);
+                if (dragState.deformable) {
+                    dragState.deformable.release();
+                } else {
+                    dragState.rigidBody.setBodyType(dragState.originalBodyType, true);
+                    dragState.rigidBody.setLinvel(dragState.velocity, true);
+                }
                 dragState = null;
             }
             zincCameraControl.enable();
         }
 
-        domElement.addEventListener('mousedown', onMouseDown);
+        // Capture phase so this runs before zincjs's own camera mousedown
+        // listener (registered earlier, at camera-control creation). Otherwise
+        // the camera records a rotate state on the first click, disable() then
+        // removes its mouseup so that state is never cleared, and the view
+        // tumbles after the drag ends.
+        domElement.addEventListener('mousedown', onMouseDown, { capture: true });
         domElement.addEventListener('mousemove', onMouseMove);
         domElement.addEventListener('mouseup', onMouseUp);
         domElement.addEventListener('mouseleave', onMouseUp);
