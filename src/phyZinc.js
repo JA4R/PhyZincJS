@@ -26,6 +26,10 @@ const JointOptions = function( type, axis, limits, anchor, contactsEnabled) {
     };
 }
 
+// Floors/walls use trimesh colliders, which deformables can't collide against,
+// so each also records this thin analytic box proxy (see getColliderShapes).
+const FLOOR_PROXY_HALF_THICKNESS = 0.02;
+
 const PhyZinc = function() {
     this.rapier = undefined;
     this.renderer = undefined;
@@ -33,6 +37,10 @@ const PhyZinc = function() {
     let gravity = -9.81;
     const objects = [];
     const joints = [];
+    // Simulated objects stepped alongside Rapier, e.g. a pbdCloth patch:
+    // { mesh, step(), setColliders?(shapes), dispose?() }.
+    const deformables = [];
+    let simulationStarted = false;
     const addedObjectCallbacks = [];
     const downloadCompletedCallbacks = [];
     let paused = false;
@@ -85,6 +93,50 @@ const PhyZinc = function() {
         zincObject.isPhyZincsObject = true;
         scene.addZincObject(zincObject);
         return zincObject;
+    }
+
+    // Adds a deformable (GPU-simulated) object's mesh to the scene and steps it
+    // after each Rapier step, feeding it the current rigid colliders first.
+    this.addDeformable = (deformable, name) => {
+        const zincObject = this.addMesh(deformable.mesh, name);
+        deformables.push(deformable);
+        return zincObject;
+    }
+
+    // World-space analytic shapes of every collider a deformable can collide
+    // against: Rapier balls, cuboids and capsules, plus floor proxies. Convex
+    // hull/trimesh colliders (e.g. the gltf ragdoll parts) are not included.
+    this.getColliderShapes = () => {
+        const shapes = [];
+        objects.forEach(zincObject => {
+            if (zincObject.analyticShape) {
+                shapes.push(zincObject.analyticShape);
+                return;
+            }
+            const collider = zincObject.worldCollider;
+            if (!this.rapier || !collider) return;
+            const shapeType = collider.shapeType();
+            const ShapeType = this.rapier.ShapeType;
+            let shape;
+            if (shapeType === ShapeType.Ball) {
+                shape = { type: 'sphere', radius: collider.radius() };
+            } else if (shapeType === ShapeType.Cuboid) {
+                const h = collider.halfExtents();
+                shape = { type: 'box', halfExtents: [h.x, h.y, h.z] };
+            } else if (shapeType === ShapeType.Capsule) {
+                shape = { type: 'capsule', halfHeight: collider.halfHeight(), radius: collider.radius() };
+            } else {
+                return;
+            }
+            const t = collider.translation();
+            const r = collider.rotation();
+            const v = zincObject.rigidBody.linvel();
+            shape.position = [t.x, t.y, t.z];
+            shape.rotation = [r.x, r.y, r.z, r.w];
+            shape.linearVelocity = [v.x, v.y, v.z];
+            shapes.push(shape);
+        });
+        return shapes;
     }
 
     this.addSphere = (position, radius, widthSegments, heightSegments) => {
@@ -163,6 +215,16 @@ const PhyZinc = function() {
             const zincObject = this.addGeometry(geometry, material, "floor");
             const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
             this.addPhysicsToObject(zincObject, options);
+            // Same rotation order as the geometry above: X, then Y, then Z.
+            const [rx, ry, rz] = rotation ?? [0, 0, 0];
+            const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'ZYX'));
+            zincObject.analyticShape = {
+                type: 'box',
+                position: [...position],
+                rotation: [q.x, q.y, q.z, q.w],
+                halfExtents: [dimension[0] / 2, dimension[1] / 2, FLOOR_PROXY_HALF_THICKNESS],
+                linearVelocity: [0, 0, 0],
+            };
             return zincObject;
         } else {
             console.error("Physics engine is not ready yet.");
@@ -304,7 +366,7 @@ const PhyZinc = function() {
     }
 
     this.enableDragging = () => {
-        if (!this.renderer || dragListenersAttached) return;
+        if (!this.renderer || !this.rapier || dragListenersAttached) return;
         dragListenersAttached = true;
 
         const domElement = this.renderer.getThreeJSRenderer().domElement;
@@ -382,20 +444,30 @@ const PhyZinc = function() {
             downloadCompletedCallbacks.forEach(callback => {
                 callback();
             })
-            this.renderer.addPreRenderCallbackFunction(updatePhysicalWorld());
-            this.renderer.playAnimation = true;
-            this.renderer.animate();
+            this.startSimulation();
             const scene = this.renderer.getCurrentScene();
             const zincCameraControl = scene.getZincCameraControls();
 			//zincCameraControl.enableRaycaster(scene, _pickingCallback(), _hoverCallback());
-            this.enableDragging();
             scene.viewAll();
         }
     }
 
+    // Starts the render loop and per-frame physics stepping. Called
+    // automatically once a gltf/metadata download completes; call it directly
+    // for scenes built only from primitives and deformables.
+    this.startSimulation = () => {
+        if (!this.renderer || simulationStarted) return;
+        simulationStarted = true;
+        this.renderer.addPreRenderCallbackFunction(updatePhysicalWorld());
+        this.renderer.playAnimation = true;
+        this.renderer.animate();
+        this.enableDragging();
+    }
+
     const updatePhysicalWorld = () => {
         return () => {
-            if (this.physicsWorld && !paused) {
+            if (paused) return;
+            if (this.physicsWorld) {
                 this.physicsWorld.step();
                 objects.forEach(target => {
                     if (target.isZincObject) {
@@ -409,6 +481,13 @@ const PhyZinc = function() {
                             morph.quaternion.set(r.x, r.y, r.z, r.w);
                         }
                     }
+                });
+            }
+            if (deformables.length > 0) {
+                const shapes = this.getColliderShapes();
+                deformables.forEach(deformable => {
+                    deformable.setColliders?.(shapes);
+                    deformable.step();
                 });
             }
         }
@@ -470,6 +549,8 @@ const PhyZinc = function() {
         });
         objects.length = 0;
         joints.length = 0;
+        deformables.forEach(deformable => deformable.dispose?.());
+        deformables.length = 0;
         this.physicsWorld = undefined;
         if (this.renderer) {
             this.renderer.dispose();

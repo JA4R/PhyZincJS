@@ -51,6 +51,6 @@
     "@mui/material": "^5.15.14",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "zincjs": "^2.4.1-beta.1"
+    "zincjs": "^2.4.1-beta.4"
   }
 }

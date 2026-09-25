@@ -1,8 +1,9 @@
-import { useImperativeHandle, forwardRef, useState, useRef, useEffect } from 'react';
-import { startScene, startClothScene } from './createApp.js';
+import { useImperativeHandle, forwardRef, useRef, useEffect } from 'react';
 import Box from '@mui/material/Box';
 
 type Props = {
+  // A demo's start function (see demos/index.js); resolves to its PhyZinc.
+  start: (mount: HTMLElement, gravity: number) => Promise<any>;
   gravity: number;
 };
 
@@ -11,46 +12,58 @@ export type SceneHandle = {
   pause: () => void;
 };
 
-const Scene = forwardRef<SceneHandle, Props>((props, ref) => {
-  const mountRef = useRef(null);
-  const [phyZinc, setPhyZinc] = useState<any>(null);
+const disposeInstance = (phyZinc: any) => {
+  const domElement = phyZinc.renderer?.getThreeJSRenderer().domElement;
+  phyZinc.dispose();
+  domElement?.parentNode?.removeChild(domElement);
+};
 
-  useImperativeHandle(ref, () => ({
-    restart,
-    pause,
-  }));
-
-  const restart = (gravity?: number) => {
-    dispose();
-    initialise(mountRef, gravity === undefined ? props : { ...props, gravity });
-  }
-
-  const pause = () => {
-    phyZinc.pause(!phyZinc.isPaused());
-  }
+const Scene = forwardRef<SceneHandle, Props>(({ start, gravity }, ref) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  // A ref, not state: the effect cleanup below runs with the closure from the
+  // first render, so it must read the current instance through a ref.
+  const phyZincRef = useRef<any>(null);
+  // Bumped on every initialise and on unmount, so a start() that resolves
+  // after the scene was restarted or switched away is disposed, not kept.
+  const generationRef = useRef(0);
 
   const dispose = () => {
-    const domElement = phyZinc.renderer.getThreeJSRenderer().domElement;
-    phyZinc.dispose();
-    mountRef.current.removeChild(domElement);
-  }
-
-  const initialise = async (mountRef, props) => {
-    //const obj = await startScene(mountRef.current, props.gravity);
-    const obj = await startClothScene(mountRef.current);
-    setPhyZinc(obj);
+    if (phyZincRef.current) {
+      disposeInstance(phyZincRef.current);
+      phyZincRef.current = null;
+    }
   };
 
+  const initialise = async (sceneGravity: number) => {
+    const generation = ++generationRef.current;
+    const phyZinc = await start(mountRef.current!, sceneGravity);
+    if (generation !== generationRef.current) {
+      disposeInstance(phyZinc);
+      return;
+    }
+    phyZincRef.current = phyZinc;
+  };
+
+  useImperativeHandle(ref, () => ({
+    restart: (newGravity?: number) => {
+      dispose();
+      initialise(newGravity ?? gravity);
+    },
+    pause: () => {
+      const phyZinc = phyZincRef.current;
+      phyZinc?.pause(!phyZinc.isPaused());
+    },
+  }));
+
   useEffect(() => {
-
-    initialise(mountRef, props);
-
+    initialise(gravity);
     return () => {
+      generationRef.current++;
       dispose();
     };
   }, []);
 
-  return <Box ref={mountRef} sx={{ top:"0px", position: "absolute", width: 1, height: 1 }}/>;
-})
+  return <Box ref={mountRef} sx={{ top: "0px", position: "absolute", width: 1, height: 1 }} />;
+});
 
 export default Scene;

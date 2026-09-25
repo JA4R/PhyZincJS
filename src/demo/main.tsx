@@ -5,15 +5,17 @@ import CssBaseline from '@mui/material/CssBaseline';
 import theme from './theme.tsx';
 import Scene, { SceneHandle } from './Scene.tsx';
 import ControlPanel from './ControlPanel.tsx';
+import { DEMOS } from './demos/index.js';
 
 const DEFAULT_GRAVITY = 9.81;
 const GRAVITY_SCALE = 0.1;
 
-const createRandomString = () => (Math.random() + 1).toString(36).substring(7);
+const DEFAULT_DEMO = 'cloth-collision';
 
 const App = () => {
   const sceneRef = React.useRef<SceneHandle>(null);
-  const [sceneKey] = React.useState(createRandomString);
+  const [demoKey, setDemoKey] = React.useState(DEFAULT_DEMO);
+  const demo = DEMOS.find((d) => d.key === demoKey) ?? DEMOS[0];
   const [paused, setPaused] = React.useState(true);
   const gravityRef = React.useRef(DEFAULT_GRAVITY);
 
@@ -29,6 +31,13 @@ const App = () => {
     setPaused(true);
   };
 
+  // Scene is keyed by demoKey, so changing it unmounts (and disposes) the old
+  // scene and mounts the new one. Every demo starts paused.
+  const handleDemoChange = (value: string) => {
+    setDemoKey(value);
+    setPaused(true);
+  };
+
   const handlePauseToggle = () => {
     sceneRef.current?.pause();
     setPaused((prev) => !prev);
@@ -39,6 +48,15 @@ const App = () => {
       <CssBaseline />
       <ControlPanel
         title="Simulation"
+        selects={[
+          {
+            key: 'demo',
+            label: 'Demo',
+            value: demo.key,
+            options: DEMOS.map((d) => ({ value: d.key, label: d.label })),
+            onChange: handleDemoChange,
+          },
+        ]}
         fields={[
           {
             key: 'gravity',
@@ -58,7 +76,12 @@ const App = () => {
           },
         ]}
       />
-      <Scene gravity={-DEFAULT_GRAVITY * GRAVITY_SCALE} key={sceneKey} ref={sceneRef} />
+      <Scene
+        key={demo.key}
+        ref={sceneRef}
+        start={demo.start}
+        gravity={-gravityRef.current * GRAVITY_SCALE}
+      />
     </ThemeProvider>
   );
 };

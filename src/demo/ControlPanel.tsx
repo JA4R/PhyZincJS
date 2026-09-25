@@ -7,6 +7,7 @@ import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import TextField from '@mui/material/TextField';
+import MenuItem from '@mui/material/MenuItem';
 
 export type ControlAction = {
   key: string;
@@ -23,15 +24,24 @@ export type ControlField = {
   onChange: (value: string) => void;
 };
 
+export type ControlSelect = {
+  key: string;
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+};
+
 type Props = {
   title?: string;
   actions: ControlAction[];
   fields?: ControlField[];
+  selects?: ControlSelect[];
 };
 
 // Actions/fields are plain config arrays rather than hardcoded markup, so adding
 // another button or numeric input later is a one-line addition at the call site.
-const ControlPanel = ({ title = 'Controls', actions, fields = [] }: Props) => {
+const ControlPanel = ({ title = 'Controls', actions, fields = [], selects = [] }: Props) => {
   const [open, setOpen] = useState(true);
 
   return (
@@ -65,6 +75,23 @@ const ControlPanel = ({ title = 'Controls', actions, fields = [] }: Props) => {
         <Collapse in={open}>
           <Stack spacing={1.5}>
             <Divider />
+            {selects.map((select) => (
+              <TextField
+                key={select.key}
+                select
+                label={select.label}
+                size="small"
+                value={select.value}
+                onChange={(e) => select.onChange(e.target.value)}
+                fullWidth
+              >
+                {select.options.map((option) => (
+                  <MenuItem key={option.value} value={option.value}>
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            ))}
             {fields.length > 0 && (
               <Stack spacing={1.5}>
                 {fields.map((field) => (
