@@ -1,6 +1,6 @@
 import Zinc from "zincjs";
 import { PhyZinc } from "../../phyZinc.js"
-import { createClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
+import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
 
 // A cloth dropped over resting rigid bodies, with a ball falling onto it.
 // Coupling is one-way: bodies shape the cloth, the cloth doesn't push back, so
@@ -31,7 +31,8 @@ export async function startClothCollisionScene(mount, gravity) {
   clothOptions.pin = 'none';
   clothOptions.rowDirection = [0, -1, 0];
   clothOptions.gravity = [0, 0, gravity];
-  const cloth = await createClothPatch(renderer, clothOptions);
+  const cloth = new ClothPatch(renderer, clothOptions);
+  await cloth.initialise();
   phyZinc.addDeformable(cloth, "cloth");
   phyZinc.startSimulation();
 

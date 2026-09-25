@@ -1,6 +1,6 @@
 import Zinc from "zincjs";
 import { PhyZinc } from "../../phyZinc.js"
-import { createClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
+import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
 
 // WebGPU XPBD cloth curtain pinned at its top corners, blown by gusty wind.
 // Self-contained, no Rapier: never calls phyZinc.initialise() (which loads the
@@ -14,7 +14,8 @@ export async function startWindClothScene(mount, gravity) {
   const scene = phyZinc.startNewScene("cloth");
   const clothOptions = ClothOptions(20, 20, 0.1, [0, 0, 0]);
   clothOptions.gravity = [0, 0, gravity];
-  const cloth = await createClothPatch(renderer, clothOptions);
+  const cloth = new ClothPatch(renderer, clothOptions);
+  await cloth.initialise();
   // +Y is the curtain's normal (it hangs in the XZ plane), blowing it away
   // from the camera, which sits on -Y.
   // Wind was tuned against full gravity (9.81), so scale it with gravity to

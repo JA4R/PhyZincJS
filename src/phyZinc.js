@@ -1,5 +1,6 @@
 import { getRapier } from './physics/rapier';
 import Zinc from "zincjs";
+import { Deformable } from './physics/deformable.js';
 const THREE = Zinc.THREE;
 
 
@@ -37,10 +38,8 @@ const PhyZinc = function() {
     let gravity = -9.81;
     const objects = [];
     const joints = [];
-    // Simulated objects stepped alongside Rapier, e.g. a pbdCloth patch:
-    // { mesh, step(), setColliders?(shapes), dispose?() }, plus optionally for
-    // mouse dragging: pick(ray) -> { point, distance, ... } | null,
-    // grab(hit), moveGrab(point), release().
+    // Deformable instances (e.g. ClothPatch) stepped alongside Rapier; see
+    // physics/deformable.js for the interface PhyZinc relies on.
     const deformables = [];
     let simulationStarted = false;
     const addedObjectCallbacks = [];
@@ -100,6 +99,10 @@ const PhyZinc = function() {
     // Adds a deformable (GPU-simulated) object's mesh to the scene and steps it
     // after each Rapier step, feeding it the current rigid colliders first.
     this.addDeformable = (deformable, name) => {
+        if (!(deformable instanceof Deformable)) {
+            console.error("addDeformable expects a Deformable (see physics/deformable.js)");
+            return;
+        }
         const zincObject = this.addMesh(deformable.mesh, name);
         deformables.push(deformable);
         return zincObject;
@@ -407,7 +410,7 @@ const PhyZinc = function() {
             let deformableHit = null;
             let hitDeformable = null;
             deformables.forEach(deformable => {
-                const hit = deformable.pick?.(raycaster.ray);
+                const hit = deformable.pick(raycaster.ray);
                 if (hit && (!deformableHit || hit.distance < deformableHit.distance)) {
                     deformableHit = hit;
                     hitDeformable = deformable;
@@ -541,7 +544,7 @@ const PhyZinc = function() {
             if (deformables.length > 0) {
                 const shapes = this.getColliderShapes();
                 deformables.forEach(deformable => {
-                    deformable.setColliders?.(shapes);
+                    deformable.setColliders(shapes);
                     deformable.step();
                 });
             }
@@ -604,7 +607,7 @@ const PhyZinc = function() {
         });
         objects.length = 0;
         joints.length = 0;
-        deformables.forEach(deformable => deformable.dispose?.());
+        deformables.forEach(deformable => deformable.dispose());
         deformables.length = 0;
         this.physicsWorld = undefined;
         if (this.renderer) {

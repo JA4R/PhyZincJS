@@ -1,4 +1,5 @@
 import Zinc from "zincjs";
+import { Deformable } from "./deformable.js";
 const THREE = Zinc.THREE;
 const {
     Fn, attributeArray, instanceIndex, uniform, vec3, vec4, float, int, select, sin, Loop
@@ -138,327 +139,353 @@ const localDistance = (local, type, params) => {
     return select(type.lessThan(0.5), dSphere, select(type.lessThan(1.5), dBox, dCapsule));
 }
 
-async function createClothPatch(renderer, options) {
-    const opts = ClothOptions(
-        options?.gridWidth, options?.gridHeight, options?.spacing, options?.origin,
-        options?.pin, options?.gravity, options?.damping, options?.solverIterations,
-        options?.stretchCompliance, options?.bendCompliance, options?.colDirection,
-        options?.rowDirection, options?.collisionThickness, options?.friction
-    );
-    const {
-        gridWidth, gridHeight, spacing, origin, pin, gravity, damping, solverIterations,
-        stretchCompliance, bendCompliance, colDirection, rowDirection, collisionThickness, friction
-    } = opts;
-    const particleCount = gridWidth * gridHeight;
-
-    // attributeArray (StorageBufferAttribute), not instancedArray
-    // (StorageInstancedBufferAttribute) — this Mesh is a regular, non-instanced
-    // draw, so a per-instance buffer would have every vertex read element(0)
-    // (instance_index is always 0), collapsing the whole mesh to one point.
-    const positionSettled = attributeArray(particleCount, 'vec3');
-    const positionScratchA = attributeArray(particleCount, 'vec3');
-    const positionScratchB = attributeArray(particleCount, 'vec3');
-    const velocity = attributeArray(particleCount, 'vec3');
-    const invMass = attributeArray(particleCount, 'float');
-    // XPBD Lagrange multipliers, one per constraint per particle (see
-    // xpbdConstraint). Slots: x=left y=right z=up w=down.
-    const lambdaStructural = attributeArray(particleCount, 'vec4');
-    const lambdaBending = attributeArray(particleCount, 'vec4');
-    // Rigid colliders, written from the CPU each step by setColliders(). Per
-    // collider, COLLIDER_STRIDE vec4s: [position, type], [rotation quaternion],
-    // [shape params], [linear velocity, unused].
-    const colliderData = attributeArray(MAX_COLLIDERS * COLLIDER_STRIDE, 'vec4');
-
-    const gridWidthU = uniform(gridWidth, 'int');
-    const gridHeightU = uniform(gridHeight, 'int');
-    const restLengthU = uniform(spacing, 'float');
-    const restLength2U = uniform(spacing * 2, 'float');
-    const gravityU = uniform(new THREE.Vector3(gravity[0], gravity[1], gravity[2]));
-    const dampingU = uniform(damping, 'float');
-    const dt = 1 / 60;
-    const dtU = uniform(dt, 'float');
-    const windU = uniform(new THREE.Vector3(0, 0, 0));
-    const gustU = uniform(0.0, 'float');
-    const timeU = uniform(0.0, 'float');
-    // α̃ = α / dt² (time-step-scaled compliance), precomputed on the CPU.
-    const stretchAlphaTildeU = uniform(stretchCompliance / (dt * dt), 'float');
-    const bendAlphaTildeU = uniform(bendCompliance / (dt * dt), 'float');
-    // Index of the particle held by the mouse (-1 = none) and where it's held.
-    const grabIndexU = uniform(-1, 'int');
-    const grabTargetU = uniform(new THREE.Vector3());
-    // Effective inverse mass: a grabbed particle is treated as pinned, so its
-    // neighbours are pulled towards it and nothing pulls it back.
-    const invMassOf = (index) =>
-        select(index.equal(grabIndexU), float(0.0), invMass.element(index));
-    const colliderCountU = uniform(0, 'int');
-    const thicknessU = uniform(collisionThickness, 'float');
-    const frictionU = uniform(friction, 'float');
-
-    // Distance and outward normal from world point p to collider k's surface.
-    // The normal is the central-difference gradient of the local distance
-    // field, rotated back to world space — one generic path for every shape.
-    const colliderContact = (p, k) => {
-        const base = k.mul(COLLIDER_STRIDE);
-        const header = colliderData.element(base).toVar();
-        const rotation = colliderData.element(base.add(1)).toVar();
-        const params = colliderData.element(base.add(2)).toVar();
-        const type = header.w;
-        const inverseRotation = vec4(rotation.xyz.negate(), rotation.w);
-        const local = rotateByQuaternion(inverseRotation, p.sub(header.xyz)).toVar();
-        const h = 1e-4;
-        const gradient = vec3(
-            localDistance(local.add(vec3(h, 0, 0)), type, params)
-                .sub(localDistance(local.sub(vec3(h, 0, 0)), type, params)),
-            localDistance(local.add(vec3(0, h, 0)), type, params)
-                .sub(localDistance(local.sub(vec3(0, h, 0)), type, params)),
-            localDistance(local.add(vec3(0, 0, h)), type, params)
-                .sub(localDistance(local.sub(vec3(0, 0, h)), type, params))
+class ClothPatch extends Deformable {
+    // Builds every GPU buffer and compute kernel (synchronously, like any
+    // three.js node setup). Call initialise() before the first step().
+    constructor(renderer, options) {
+        super();
+        const opts = ClothOptions(
+            options?.gridWidth, options?.gridHeight, options?.spacing, options?.origin,
+            options?.pin, options?.gravity, options?.damping, options?.solverIterations,
+            options?.stretchCompliance, options?.bendCompliance, options?.colDirection,
+            options?.rowDirection, options?.collisionThickness, options?.friction
         );
-        const normal = rotateByQuaternion(rotation, gradient.normalize());
-        const distance = localDistance(local, type, params);
-        const bodyVelocity = colliderData.element(base.add(3)).xyz;
-        return { distance, normal, bodyVelocity };
-    }
+        const {
+            gridWidth, gridHeight, spacing, origin, pin, gravity, damping, solverIterations,
+            stretchCompliance, bendCompliance, colDirection, rowDirection, collisionThickness, friction
+        } = opts;
+        const particleCount = gridWidth * gridHeight;
 
-    const initKernel = Fn(() => {
-        const i = instanceIndex.toInt();
-        const col = i.mod(gridWidthU);
-        const row = i.div(gridWidthU);
+        // attributeArray (StorageBufferAttribute), not instancedArray
+        // (StorageInstancedBufferAttribute) — this Mesh is a regular, non-instanced
+        // draw, so a per-instance buffer would have every vertex read element(0)
+        // (instance_index is always 0), collapsing the whole mesh to one point.
+        const positionSettled = attributeArray(particleCount, 'vec3');
+        const positionScratchA = attributeArray(particleCount, 'vec3');
+        const positionScratchB = attributeArray(particleCount, 'vec3');
+        const velocity = attributeArray(particleCount, 'vec3');
+        const invMass = attributeArray(particleCount, 'float');
+        // XPBD Lagrange multipliers, one per constraint per particle (see
+        // xpbdConstraint). Slots: x=left y=right z=up w=down.
+        const lambdaStructural = attributeArray(particleCount, 'vec4');
+        const lambdaBending = attributeArray(particleCount, 'vec4');
+        // Rigid colliders, written from the CPU each step by setColliders(). Per
+        // collider, COLLIDER_STRIDE vec4s: [position, type], [rotation quaternion],
+        // [shape params], [linear velocity, unused].
+        const colliderData = attributeArray(MAX_COLLIDERS * COLLIDER_STRIDE, 'vec4');
 
-        const pos = vec3(...origin)
-            .add(vec3(...colDirection).mul(col.toFloat().mul(restLengthU)))
-            .add(vec3(...rowDirection).mul(row.toFloat().mul(restLengthU)));
-        positionSettled.element(i).assign(pos);
-        velocity.element(i).assign(vec3(0, 0, 0));
-        lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
-        lambdaBending.element(i).assign(vec4(0, 0, 0, 0));
+        const gridWidthU = uniform(gridWidth, 'int');
+        const gridHeightU = uniform(gridHeight, 'int');
+        const restLengthU = uniform(spacing, 'float');
+        const restLength2U = uniform(spacing * 2, 'float');
+        const gravityU = uniform(new THREE.Vector3(gravity[0], gravity[1], gravity[2]));
+        const dampingU = uniform(damping, 'float');
+        const dt = 1 / 60;
+        const dtU = uniform(dt, 'float');
+        const windU = uniform(new THREE.Vector3(0, 0, 0));
+        const gustU = uniform(0.0, 'float');
+        const timeU = uniform(0.0, 'float');
+        // α̃ = α / dt² (time-step-scaled compliance), precomputed on the CPU.
+        const stretchAlphaTildeU = uniform(stretchCompliance / (dt * dt), 'float');
+        const bendAlphaTildeU = uniform(bendCompliance / (dt * dt), 'float');
+        // Index of the particle held by the mouse (-1 = none) and where it's held.
+        const grabIndexU = uniform(-1, 'int');
+        const grabTargetU = uniform(new THREE.Vector3());
+        // Effective inverse mass: a grabbed particle is treated as pinned, so its
+        // neighbours are pulled towards it and nothing pulls it back.
+        const invMassOf = (index) =>
+            select(index.equal(grabIndexU), float(0.0), invMass.element(index));
+        const colliderCountU = uniform(0, 'int');
+        const thicknessU = uniform(collisionThickness, 'float');
+        const frictionU = uniform(friction, 'float');
 
-        const firstCol = col.equal(0);
-        const lastCol = col.equal(gridWidthU.sub(1));
-        const firstRow = row.equal(0);
-        const lastRow = row.equal(gridHeightU.sub(1));
-        const pinnedByMode = {
-            topCorners: () => firstRow.and(firstCol.or(lastCol)),
-            corners: () => firstRow.or(lastRow).and(firstCol.or(lastCol)),
-            edges: () => firstRow.or(lastRow).or(firstCol).or(lastCol),
-            none: () => col.equal(-1), // never true
-        };
-        if (!pinnedByMode[pin]) {
-            throw new Error(`Unknown cloth pin mode "${pin}"`);
+        // Distance and outward normal from world point p to collider k's surface.
+        // The normal is the central-difference gradient of the local distance
+        // field, rotated back to world space — one generic path for every shape.
+        const colliderContact = (p, k) => {
+            const base = k.mul(COLLIDER_STRIDE);
+            const header = colliderData.element(base).toVar();
+            const rotation = colliderData.element(base.add(1)).toVar();
+            const params = colliderData.element(base.add(2)).toVar();
+            const type = header.w;
+            const inverseRotation = vec4(rotation.xyz.negate(), rotation.w);
+            const local = rotateByQuaternion(inverseRotation, p.sub(header.xyz)).toVar();
+            const h = 1e-4;
+            const gradient = vec3(
+                localDistance(local.add(vec3(h, 0, 0)), type, params)
+                    .sub(localDistance(local.sub(vec3(h, 0, 0)), type, params)),
+                localDistance(local.add(vec3(0, h, 0)), type, params)
+                    .sub(localDistance(local.sub(vec3(0, h, 0)), type, params)),
+                localDistance(local.add(vec3(0, 0, h)), type, params)
+                    .sub(localDistance(local.sub(vec3(0, 0, h)), type, params))
+            );
+            const normal = rotateByQuaternion(rotation, gradient.normalize());
+            const distance = localDistance(local, type, params);
+            const bodyVelocity = colliderData.element(base.add(3)).xyz;
+            return { distance, normal, bodyVelocity };
         }
-        const pinned = pinnedByMode[pin]();
-        invMass.element(i).assign(select(pinned, float(0.0), float(1.0)));
-    })().compute(particleCount);
 
-    const predictKernel = Fn(() => {
-        const i = instanceIndex.toInt();
-        const col = i.mod(gridWidthU);
-        const row = i.div(gridWidthU);
-        const selfInvMass = invMassOf(i);
-        const vel = velocity.element(i).toVar();
+        const initKernel = Fn(() => {
+            const i = instanceIndex.toInt();
+            const col = i.mod(gridWidthU);
+            const row = i.div(gridWidthU);
 
-        // Surface normal from central differences over grid neighbours (clamped
-        // at the edges). Reads positionSettled only, which nothing writes during
-        // this pass, so neighbour reads are race-free.
-        // int() explicitly: a bare JS number is typed float in TSL, and a
-        // float offset in integer index arithmetic fails WGSL validation.
-        const left = i.sub(col.greaterThan(0).select(int(1), int(0)));
-        const right = i.add(col.lessThan(gridWidthU.sub(1)).select(int(1), int(0)));
-        const up = i.sub(row.greaterThan(0).select(gridWidthU, int(0)));
-        const down = i.add(row.lessThan(gridHeightU.sub(1)).select(gridWidthU, int(0)));
-        const tangentU = positionSettled.element(right).sub(positionSettled.element(left));
-        const tangentV = positionSettled.element(down).sub(positionSettled.element(up));
-        const normal = tangentU.cross(tangentV).normalize();
+            const pos = vec3(...origin)
+                .add(vec3(...colDirection).mul(col.toFloat().mul(restLengthU)))
+                .add(vec3(...rowDirection).mul(row.toFloat().mul(restLengthU)));
+            positionSettled.element(i).assign(pos);
+            velocity.element(i).assign(vec3(0, 0, 0));
+            lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
+            lambdaBending.element(i).assign(vec4(0, 0, 0, 0));
 
-        // Aerodynamic-style force: only the component of relative wind along the
-        // normal pushes the cloth (air sliding along the surface does little),
-        // and relative wind includes the particle's own velocity so a surface
-        // already moving with the wind is pushed less. The gust term varies over
-        // time and across the patch so it flutters instead of holding one bulge.
-        const gust = sin(timeU.mul(2.3).add(col.toFloat().mul(0.35)).add(row.toFloat().mul(0.2)))
-            .mul(0.5).add(0.5).mul(gustU).add(1.0);
-        const relativeWind = windU.mul(gust).sub(vel);
-        const windForce = normal.mul(normal.dot(relativeWind));
+            const firstCol = col.equal(0);
+            const lastCol = col.equal(gridWidthU.sub(1));
+            const firstRow = row.equal(0);
+            const lastRow = row.equal(gridHeightU.sub(1));
+            const pinnedByMode = {
+                topCorners: () => firstRow.and(firstCol.or(lastCol)),
+                corners: () => firstRow.or(lastRow).and(firstCol.or(lastCol)),
+                edges: () => firstRow.or(lastRow).or(firstCol).or(lastCol),
+                none: () => col.equal(-1), // never true
+            };
+            if (!pinnedByMode[pin]) {
+                throw new Error(`Unknown cloth pin mode "${pin}"`);
+            }
+            const pinned = pinnedByMode[pin]();
+            invMass.element(i).assign(select(pinned, float(0.0), float(1.0)));
+        })().compute(particleCount);
 
-        vel.assign(vel.add(gravityU.add(windForce).mul(dtU).mul(selfInvMass)).mul(dampingU));
-        velocity.element(i).assign(vel);
-        // XPBD: λ accumulates over one timestep's iterations, reset every step.
-        lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
-        lambdaBending.element(i).assign(vec4(0, 0, 0, 0));
-        const predicted = positionSettled.element(i).add(vel.mul(dtU));
-        positionScratchA.element(i).assign(select(i.equal(grabIndexU), grabTargetU, predicted));
-    })().compute(particleCount);
+        const predictKernel = Fn(() => {
+            const i = instanceIndex.toInt();
+            const col = i.mod(gridWidthU);
+            const row = i.div(gridWidthU);
+            const selfInvMass = invMassOf(i);
+            const vel = velocity.element(i).toVar();
 
-    const buildSolveKernel = (readBuf, writeBuf) => Fn(() => {
-        const i = instanceIndex.toInt();
-        const col = i.mod(gridWidthU);
-        const row = i.div(gridWidthU);
-        const selfInvMass = invMassOf(i);
-        const selfPos = readBuf.element(i).toVar();
-        const structLambda = lambdaStructural.element(i).toVar();
-        const bendLambda = lambdaBending.element(i).toVar();
+            // Surface normal from central differences over grid neighbours (clamped
+            // at the edges). Reads positionSettled only, which nothing writes during
+            // this pass, so neighbour reads are race-free.
+            // int() explicitly: a bare JS number is typed float in TSL, and a
+            // float offset in integer index arithmetic fails WGSL validation.
+            const left = i.sub(col.greaterThan(0).select(int(1), int(0)));
+            const right = i.add(col.lessThan(gridWidthU.sub(1)).select(int(1), int(0)));
+            const up = i.sub(row.greaterThan(0).select(gridWidthU, int(0)));
+            const down = i.add(row.lessThan(gridHeightU.sub(1)).select(gridWidthU, int(0)));
+            const tangentU = positionSettled.element(right).sub(positionSettled.element(left));
+            const tangentV = positionSettled.element(down).sub(positionSettled.element(up));
+            const normal = tangentU.cross(tangentV).normalize();
 
-        const solve = (valid, neighborIndex, restLen, lambda, alphaTilde) =>
-            xpbdConstraint(i, selfPos, selfInvMass, readBuf, invMassOf, valid, neighborIndex,
-                restLen, lambda, alphaTilde);
+            // Aerodynamic-style force: only the component of relative wind along the
+            // normal pushes the cloth (air sliding along the surface does little),
+            // and relative wind includes the particle's own velocity so a surface
+            // already moving with the wind is pushed less. The gust term varies over
+            // time and across the patch so it flutters instead of holding one bulge.
+            const gust = sin(timeU.mul(2.3).add(col.toFloat().mul(0.35)).add(row.toFloat().mul(0.2)))
+                .mul(0.5).add(0.5).mul(gustU).add(1.0);
+            const relativeWind = windU.mul(gust).sub(vel);
+            const windForce = normal.mul(normal.dot(relativeWind));
 
-        // structural (adjacent grid neighbors): λ slots x=left y=right z=up w=down
-        const sLeft = solve(col.greaterThan(0), i.sub(1), restLengthU, structLambda.x, stretchAlphaTildeU);
-        const sRight = solve(col.lessThan(gridWidthU.sub(1)), i.add(1), restLengthU, structLambda.y, stretchAlphaTildeU);
-        const sUp = solve(row.greaterThan(0), i.sub(gridWidthU), restLengthU, structLambda.z, stretchAlphaTildeU);
-        const sDown = solve(row.lessThan(gridHeightU.sub(1)), i.add(gridWidthU), restLengthU, structLambda.w, stretchAlphaTildeU);
+            vel.assign(vel.add(gravityU.add(windForce).mul(dtU).mul(selfInvMass)).mul(dampingU));
+            velocity.element(i).assign(vel);
+            // XPBD: λ accumulates over one timestep's iterations, reset every step.
+            lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
+            lambdaBending.element(i).assign(vec4(0, 0, 0, 0));
+            const predicted = positionSettled.element(i).add(vel.mul(dtU));
+            positionScratchA.element(i).assign(select(i.equal(grabIndexU), grabTargetU, predicted));
+        })().compute(particleCount);
 
-        // bending (2-away grid neighbors), same slot layout
-        const bLeft = solve(col.greaterThan(1), i.sub(2), restLength2U, bendLambda.x, bendAlphaTildeU);
-        const bRight = solve(col.lessThan(gridWidthU.sub(2)), i.add(2), restLength2U, bendLambda.y, bendAlphaTildeU);
-        const bUp = solve(row.greaterThan(1), i.sub(gridWidthU.mul(2)), restLength2U, bendLambda.z, bendAlphaTildeU);
-        const bDown = solve(row.lessThan(gridHeightU.sub(2)), i.add(gridWidthU.mul(2)), restLength2U, bendLambda.w, bendAlphaTildeU);
+        const buildSolveKernel = (readBuf, writeBuf) => Fn(() => {
+            const i = instanceIndex.toInt();
+            const col = i.mod(gridWidthU);
+            const row = i.div(gridWidthU);
+            const selfInvMass = invMassOf(i);
+            const selfPos = readBuf.element(i).toVar();
+            const structLambda = lambdaStructural.element(i).toVar();
+            const bendLambda = lambdaBending.element(i).toVar();
 
-        const all = [sLeft, sRight, sUp, sDown, bLeft, bRight, bUp, bDown];
-        const correction = all.reduce((sum, c) => sum.add(c.correction), vec3(0, 0, 0));
+            const solve = (valid, neighborIndex, restLen, lambda, alphaTilde) =>
+                xpbdConstraint(i, selfPos, selfInvMass, readBuf, invMassOf, valid, neighborIndex,
+                    restLen, lambda, alphaTilde);
 
-        lambdaStructural.element(i).assign(structLambda.add(
-            vec4(sLeft.dLambda, sRight.dLambda, sUp.dLambda, sDown.dLambda)));
-        lambdaBending.element(i).assign(bendLambda.add(
-            vec4(bLeft.dLambda, bRight.dLambda, bUp.dLambda, bDown.dLambda)));
+            // structural (adjacent grid neighbors): λ slots x=left y=right z=up w=down
+            const sLeft = solve(col.greaterThan(0), i.sub(1), restLengthU, structLambda.x, stretchAlphaTildeU);
+            const sRight = solve(col.lessThan(gridWidthU.sub(1)), i.add(1), restLengthU, structLambda.y, stretchAlphaTildeU);
+            const sUp = solve(row.greaterThan(0), i.sub(gridWidthU), restLengthU, structLambda.z, stretchAlphaTildeU);
+            const sDown = solve(row.lessThan(gridHeightU.sub(1)), i.add(gridWidthU), restLengthU, structLambda.w, stretchAlphaTildeU);
 
-        // Safety clamp: cap the correction magnitude so a transient numerical
-        // issue can't explode a position in one iteration. Should never engage
-        // in normal running (it would desync λ from the applied correction).
-        const correctionLen = correction.length();
-        const maxCorrectionLen = restLengthU.mul(0.5);
-        const clampedLen = correctionLen.clamp(0.0, maxCorrectionLen);
-        const safeCorrection = correction.mul(clampedLen.div(correctionLen.max(1e-6)));
+            // bending (2-away grid neighbors), same slot layout
+            const bLeft = solve(col.greaterThan(1), i.sub(2), restLength2U, bendLambda.x, bendAlphaTildeU);
+            const bRight = solve(col.lessThan(gridWidthU.sub(2)), i.add(2), restLength2U, bendLambda.y, bendAlphaTildeU);
+            const bUp = solve(row.greaterThan(1), i.sub(gridWidthU.mul(2)), restLength2U, bendLambda.z, bendAlphaTildeU);
+            const bDown = solve(row.lessThan(gridHeightU.sub(2)), i.add(gridWidthU.mul(2)), restLength2U, bendLambda.w, bendAlphaTildeU);
 
-        // Collision constraints (inequality, C = distance - thickness >= 0):
-        // project the particle out of any collider it has entered. Applied every
-        // iteration so the distance constraints solve around the obstacles.
-        const newPos = selfPos.add(safeCorrection).toVar();
-        const movable = select(selfInvMass.greaterThan(0.0), float(1.0), float(0.0));
-        Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
-            const contact = colliderContact(newPos, k);
-            const penetration = thicknessU.sub(contact.distance).max(0.0);
-            newPos.addAssign(contact.normal.mul(penetration).mul(movable));
+            const all = [sLeft, sRight, sUp, sDown, bLeft, bRight, bUp, bDown];
+            const correction = all.reduce((sum, c) => sum.add(c.correction), vec3(0, 0, 0));
+
+            lambdaStructural.element(i).assign(structLambda.add(
+                vec4(sLeft.dLambda, sRight.dLambda, sUp.dLambda, sDown.dLambda)));
+            lambdaBending.element(i).assign(bendLambda.add(
+                vec4(bLeft.dLambda, bRight.dLambda, bUp.dLambda, bDown.dLambda)));
+
+            // Safety clamp: cap the correction magnitude so a transient numerical
+            // issue can't explode a position in one iteration. Should never engage
+            // in normal running (it would desync λ from the applied correction).
+            const correctionLen = correction.length();
+            const maxCorrectionLen = restLengthU.mul(0.5);
+            const clampedLen = correctionLen.clamp(0.0, maxCorrectionLen);
+            const safeCorrection = correction.mul(clampedLen.div(correctionLen.max(1e-6)));
+
+            // Collision constraints (inequality, C = distance - thickness >= 0):
+            // project the particle out of any collider it has entered. Applied every
+            // iteration so the distance constraints solve around the obstacles.
+            const newPos = selfPos.add(safeCorrection).toVar();
+            const movable = select(selfInvMass.greaterThan(0.0), float(1.0), float(0.0));
+            Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
+                const contact = colliderContact(newPos, k);
+                const penetration = thicknessU.sub(contact.distance).max(0.0);
+                newPos.addAssign(contact.normal.mul(penetration).mul(movable));
+            });
+
+            writeBuf.element(i).assign(newPos);
+        })().compute(particleCount);
+
+        const solveAtoB = buildSolveKernel(positionScratchA, positionScratchB);
+        const solveBtoA = buildSolveKernel(positionScratchB, positionScratchA);
+
+        const finaliseKernel = Fn(() => {
+            const i = instanceIndex.toInt();
+            const oldPos = positionSettled.element(i).toVar();
+            const finalPos = positionScratchA.element(i).toVar();
+            const vel = finalPos.sub(oldPos).div(dtU).toVar();
+
+            // Friction, applied once per step at velocity level: for particles in
+            // contact, remove a fraction of the tangential velocity relative to the
+            // touching body, so cloth grips (and is carried by) moving bodies.
+            Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
+                const contact = colliderContact(finalPos, k);
+                const touching = select(contact.distance.lessThan(thicknessU.mul(1.05)),
+                    float(1.0), float(0.0));
+                const relative = vel.sub(contact.bodyVelocity);
+                const tangential = relative.sub(contact.normal.mul(relative.dot(contact.normal)));
+                vel.subAssign(tangential.mul(frictionU).mul(touching));
+            });
+
+            velocity.element(i).assign(vel);
+            positionSettled.element(i).assign(finalPos);
+        })().compute(particleCount);
+
+        const frameNodes = [predictKernel];
+        for (let n = 0; n < solverIterations; n++) {
+            frameNodes.push(n % 2 === 0 ? solveAtoB : solveBtoA);
+        }
+        // solverIterations must be even (default 20) so the last solve pass always
+        // writes into positionScratchA, matching finaliseKernel's read above.
+        frameNodes.push(finaliseKernel);
+
+        const geometry = buildGeometry(gridWidth, gridHeight, spacing, origin, colDirection, rowDirection);
+        const material = new THREE.MeshBasicNodeMaterial({
+            color: new THREE.Color("rgb(200, 60, 60)"),
+            side: THREE.DoubleSide
         });
+        material.positionNode = positionSettled.toAttribute();
+        const mesh = new THREE.Mesh(geometry, material);
+        // The CPU bounding volume only reflects the placeholder geometry, not the
+        // GPU-deformed surface, so culling against it can wrongly hide the cloth.
+        mesh.frustumCulled = false;
 
-        writeBuf.element(i).assign(newPos);
-    })().compute(particleCount);
+        this.mesh = mesh;
+        this.options = opts;
+        this.renderer = renderer;
+        this.dt = dt;
+        this.particleCount = particleCount;
+        this.positionSettled = positionSettled;
+        this.colliderData = colliderData;
+        this.initKernel = initKernel;
+        this.frameNodes = frameNodes;
+        this.geometry = geometry;
+        this.material = material;
+        this.uniforms = {
+            time: timeU, wind: windU, gust: gustU,
+            stretchAlphaTilde: stretchAlphaTildeU, bendAlphaTilde: bendAlphaTildeU,
+            grabIndex: grabIndexU, grabTarget: grabTargetU, colliderCount: colliderCountU,
+        };
 
-    const solveAtoB = buildSolveKernel(positionScratchA, positionScratchB);
-    const solveBtoA = buildSolveKernel(positionScratchB, positionScratchA);
-
-    const finaliseKernel = Fn(() => {
-        const i = instanceIndex.toInt();
-        const oldPos = positionSettled.element(i).toVar();
-        const finalPos = positionScratchA.element(i).toVar();
-        const vel = finalPos.sub(oldPos).div(dtU).toVar();
-
-        // Friction, applied once per step at velocity level: for particles in
-        // contact, remove a fraction of the tangential velocity relative to the
-        // touching body, so cloth grips (and is carried by) moving bodies.
-        Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
-            const contact = colliderContact(finalPos, k);
-            const touching = select(contact.distance.lessThan(thicknessU.mul(1.05)),
-                float(1.0), float(0.0));
-            const relative = vel.sub(contact.bodyVelocity);
-            const tangential = relative.sub(contact.normal.mul(relative.dot(contact.normal)));
-            vel.subAssign(tangential.mul(frictionU).mul(touching));
-        });
-
-        velocity.element(i).assign(vel);
-        positionSettled.element(i).assign(finalPos);
-    })().compute(particleCount);
-
-    const frameNodes = [predictKernel];
-    for (let n = 0; n < solverIterations; n++) {
-        frameNodes.push(n % 2 === 0 ? solveAtoB : solveBtoA);
+        // CPU copy of the particle positions, used only for mouse picking. Read
+        // back from the GPU at most once in flight, so it lags 1-2 frames behind.
+        // three.js pads vec3 storage to vec4, so particle i is at [4i, 4i + 3).
+        this.pickSnapshot = null;
+        this.readbackPending = false;
     }
-    // solverIterations must be even (default 20) so the last solve pass always
-    // writes into positionScratchA, matching finaliseKernel's read above.
-    frameNodes.push(finaliseKernel);
 
-    const geometry = buildGeometry(gridWidth, gridHeight, spacing, origin, colDirection, rowDirection);
-    const material = new THREE.MeshBasicNodeMaterial({
-        color: new THREE.Color("rgb(200, 60, 60)"),
-        side: THREE.DoubleSide
-    });
-    material.positionNode = positionSettled.toAttribute();
-    const mesh = new THREE.Mesh(geometry, material);
-    // The CPU bounding volume only reflects the placeholder geometry, not the
-    // GPU-deformed surface, so culling against it can wrongly hide the cloth.
-    mesh.frustumCulled = false;
+    // Seeds every particle buffer on the GPU. Must complete before the mesh is
+    // rendered or step() is called, so no frame compute reads unseeded buffers.
+    async initialise() {
+        await this.renderer.getThreeJSRenderer().computeAsync(this.initKernel);
+        this.refreshPickSnapshot();
+    }
 
-    // Run once, before the mesh is registered or step() is ever called from the
-    // render loop, so every particle buffer is fully seeded before any frame
-    // compute reads from it.
-    await renderer.getThreeJSRenderer().computeAsync(initKernel);
-
-    // CPU copy of the particle positions, used only for mouse picking. Read
-    // back from the GPU at most once in flight, so it lags 1-2 frames behind.
-    // three.js pads vec3 storage to vec4, so particle i is at [4i, 4i + 3).
-    let pickSnapshot = null;
-    let readbackPending = false;
-    const refreshPickSnapshot = () => {
-        if (readbackPending) return;
-        readbackPending = true;
-        renderer.getThreeJSRenderer().getArrayBufferAsync(positionSettled.value)
-            .then(buffer => { pickSnapshot = new Float32Array(buffer); })
+    refreshPickSnapshot() {
+        if (this.readbackPending) return;
+        this.readbackPending = true;
+        this.renderer.getThreeJSRenderer().getArrayBufferAsync(this.positionSettled.value)
+            .then(buffer => { this.pickSnapshot = new Float32Array(buffer); })
             .catch(() => {})
-            .finally(() => { readbackPending = false; });
+            .finally(() => { this.readbackPending = false; });
     }
 
-    const step = () => {
-        timeU.value += dt;
-        renderer.getThreeJSRenderer().compute(frameNodes);
-        refreshPickSnapshot();
+    step() {
+        this.uniforms.time.value += this.dt;
+        this.renderer.getThreeJSRenderer().compute(this.frameNodes);
+        this.refreshPickSnapshot();
     }
 
-    // ray: THREE.Ray in world space. Returns the particle within one grid
-    // spacing of the ray that is nearest the camera, as { index, point,
-    // distance } (distance along the ray), or null.
-    const pickPoint = new THREE.Vector3();
-    const pick = (ray) => {
-        if (!pickSnapshot) return null;
-        const maxDistanceSq = spacing * spacing;
+    // Returns the particle within one grid spacing of the ray that is nearest
+    // the camera, as { index, point, distance } (distance along the ray), or null.
+    pick(ray) {
+        if (!this.pickSnapshot) return null;
+        const maxDistanceSq = this.options.spacing * this.options.spacing;
+        const point = new THREE.Vector3();
+        const toPoint = new THREE.Vector3();
         let best = null;
-        for (let i = 0; i < particleCount; i++) {
-            pickPoint.fromArray(pickSnapshot, i * 4);
-            const along = pickPoint.clone().sub(ray.origin).dot(ray.direction);
-            if (along < 0 || ray.distanceSqToPoint(pickPoint) > maxDistanceSq) continue;
+        for (let i = 0; i < this.particleCount; i++) {
+            point.fromArray(this.pickSnapshot, i * 4);
+            const along = toPoint.copy(point).sub(ray.origin).dot(ray.direction);
+            if (along < 0 || ray.distanceSqToPoint(point) > maxDistanceSq) continue;
             if (!best || along < best.distance) {
-                best = { index: i, point: pickPoint.clone(), distance: along };
+                best = { index: i, point: point.clone(), distance: along };
             }
         }
         return best;
     }
 
-    const grab = (hit) => {
-        grabIndexU.value = hit.index;
-        grabTargetU.value.copy(hit.point);
+    // The grabbed particle is treated as pinned at the target (see invMassOf).
+    grab(hit) {
+        this.uniforms.grabIndex.value = hit.index;
+        this.uniforms.grabTarget.value.copy(hit.point);
     }
 
-    const moveGrab = (point) => {
-        grabTargetU.value.copy(point);
+    moveGrab(point) {
+        this.uniforms.grabTarget.value.copy(point);
     }
 
     // The particle keeps the velocity it was dragged with, so it can be thrown.
-    const release = () => {
-        grabIndexU.value = -1;
+    release() {
+        this.uniforms.grabIndex.value = -1;
     }
 
     // direction/strength as one vector ([x, y, z], world units per second²
     // along the surface normal); gust is 0 for steady wind, ~1 for strong gusts.
-    const setWind = (wind, gust = 0) => {
-        windU.value.set(wind[0], wind[1], wind[2]);
-        gustU.value = gust;
+    setWind(wind, gust = 0) {
+        this.uniforms.wind.value.set(wind[0], wind[1], wind[2]);
+        this.uniforms.gust.value = gust;
     }
 
     // shapes: [{ type: 'sphere' | 'box' | 'capsule', position: [x, y, z],
     //   rotation: [x, y, z, w], radius, halfExtents: [x, y, z], halfHeight,
     //   linearVelocity: [x, y, z] }], in world space. Unknown types are skipped;
     // anything past MAX_COLLIDERS is ignored. Call before step() each frame.
-    const setColliders = (shapes) => {
-        const data = colliderData.value.array;
+    setColliders(shapes) {
+        const data = this.colliderData.value.array;
         let count = 0;
         for (const shape of shapes) {
             if (count >= MAX_COLLIDERS) break;
@@ -476,25 +503,21 @@ async function createClothPatch(renderer, options) {
             ], count * COLLIDER_STRIDE * 4);
             count++;
         }
-        colliderCountU.value = count;
-        colliderData.value.needsUpdate = true;
+        this.uniforms.colliderCount.value = count;
+        this.colliderData.value.needsUpdate = true;
     }
 
     // Compliance = 1/stiffness; 0 is rigid, larger is softer (see ClothOptions).
-    const setCompliance = (stretch, bend) => {
-        stretchAlphaTildeU.value = stretch / (dt * dt);
-        bendAlphaTildeU.value = bend / (dt * dt);
+    setCompliance(stretch, bend) {
+        const dtSq = this.dt * this.dt;
+        this.uniforms.stretchAlphaTilde.value = stretch / dtSq;
+        this.uniforms.bendAlphaTilde.value = bend / dtSq;
     }
 
-    const dispose = () => {
-        geometry.dispose();
-        material.dispose();
+    dispose() {
+        this.geometry.dispose();
+        this.material.dispose();
     }
-
-    return {
-        mesh, step, setWind, setCompliance, setColliders,
-        pick, grab, moveGrab, release, dispose
-    };
 }
 
-export { createClothPatch, ClothOptions };
+export { ClothPatch, ClothOptions };
