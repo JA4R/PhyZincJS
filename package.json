@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "Extension to ZincJS",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "build": "tsc && vite build",
     "serve": "vite --port 7000 --host",
