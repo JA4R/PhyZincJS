@@ -337,6 +337,21 @@ const PhyZinc = function() {
         return centerA.add(centerB).multiplyScalar(0.5);
     }
 
+    // Copies the rigid body's translation/rotation (as enabled by physicsT/
+    // physicsR) onto the object's mesh.
+    const syncMorphToRigidBody = (target) => {
+        if (!target.isZincObject) return;
+        const morph = target.getMorph();
+        if (target.physicsT) {
+            const t = target.rigidBody.translation();
+            morph.position.set(t.x, t.y, t.z);
+        }
+        if (target.physicsR) {
+            const r = target.rigidBody.rotation();
+            morph.quaternion.set(r.x, r.y, r.z, r.w);
+        }
+    }
+
     this.addPhysicsToObject = (zincObject, options) => {
         if (this.rapier) {
             if (zincObject && zincObject.isGeometry) {
@@ -368,6 +383,7 @@ const PhyZinc = function() {
                         zincObject.collider, zincObject.rigidBody);
                     zincObject.physicsT = options.translation;
                     zincObject.physicsR = options.rotation;
+                    syncMorphToRigidBody(zincObject);
                     objects.push(zincObject);
                 }
                 catch {
@@ -586,19 +602,7 @@ const PhyZinc = function() {
             if (paused) return;
             if (this.physicsWorld) {
                 this.physicsWorld.step();
-                objects.forEach(target => {
-                    if (target.isZincObject) {
-                        const morph = target.getMorph();
-                        if (target.physicsT) {
-                            const t = target.rigidBody.translation();
-                            morph.position.set(t.x, t.y, t.z);
-                        }
-                        if (target.physicsR) {
-                            const r = target.rigidBody.rotation();
-                            morph.quaternion.set(r.x, r.y, r.z, r.w);
-                        }
-                    }
-                });
+                objects.forEach(syncMorphToRigidBody);
             }
             if (deformables.length > 0) {
                 const shapes = this.getColliderShapes();
