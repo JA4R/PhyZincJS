@@ -41,6 +41,8 @@ const PhyZinc = function() {
     // Deformable instances (e.g. ClothPatch) stepped alongside Rapier; see
     // physics/deformable.js for the interface PhyZinc relies on.
     const deformables = [];
+    // Lights added by addSpotLight(), removed again by dispose().
+    const lights = [];
     let simulationStarted = false;
     const addedObjectCallbacks = [];
     const downloadCompletedCallbacks = [];
@@ -67,6 +69,56 @@ const PhyZinc = function() {
         return this.rapier;
     }
 
+    // Shadows only show once a shadow-casting light exists (see addSpotLight).
+    // Traverses the morph because Zinc renders a transparent mesh (e.g. the
+    // floor) as the morph drawing back faces plus a child mesh drawing front
+    // faces, and the child needs the flags too.
+    const setShadows = (zincObject, cast, receive) => {
+        zincObject.getMorph()?.traverse(child => {
+            if (child.isMesh) {
+                child.castShadow = cast;
+                child.receiveShadow = receive;
+            }
+        });
+    }
+
+    // Adds a shadow-casting THREE.SpotLight to the current scene and turns on
+    // the renderer's shadow maps. Call before startSimulation(): materials
+    // compiled before shadows are enabled won't pick them up. Positions are in
+    // world space; shadowNear/shadowFar bound the light's shadow camera, so keep
+    // them tight around the scene to avoid acne. Returns the light.
+    this.addSpotLight = (options) => {
+        if (!this.renderer) {
+            console.error("addSpotLight needs attach() to have been called first.");
+            return;
+        }
+        const {
+            position = [0, 0, 3], target = [0, 0, 0], color = 0xffffff, intensity = 5,
+            angle = Math.PI / 6, penumbra = 0.3, distance = 0, decay = 2,
+            castShadow = true, shadowMapSize = 1024, shadowNear = 0.1, shadowFar = 10,
+            shadowBias = -0.0005
+        } = options ?? {};
+        const shadowMap = this.renderer.getThreeJSRenderer().shadowMap;
+        shadowMap.enabled = true;
+        shadowMap.type = THREE.PCFSoftShadowMap;
+
+        const light = new THREE.SpotLight(color, intensity, distance, angle, penumbra, decay);
+        light.position.set(...position);
+        light.target.position.set(...target);
+        light.castShadow = castShadow;
+        light.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+        light.shadow.camera.near = shadowNear;
+        light.shadow.camera.far = shadowFar;
+        light.shadow.bias = shadowBias;
+        // The target must be in the scene so its world matrix stays up to date;
+        // otherwise the light keeps pointing at the origin.
+        const scene = this.renderer.getCurrentScene();
+        scene.addObject(light);
+        scene.addObject(light.target);
+        lights.push({ light, scene });
+        return light;
+    }
+
     this.addGeometry = (geometry, material, name) => {
         const scene = this.renderer.getCurrentScene();
         const zincObject = new Zinc.Geometry();
@@ -82,6 +134,7 @@ const PhyZinc = function() {
             }
         );
         zincObject.isPhyZincsObject = true;
+        setShadows(zincObject, true, true);
         scene.addZincObject(zincObject);
         return zincObject;
     }
@@ -92,6 +145,7 @@ const PhyZinc = function() {
         zincObject.setName(name);
         zincObject.setMesh(mesh, false, false);
         zincObject.isPhyZincsObject = true;
+        setShadows(zincObject, true, true);
         scene.addZincObject(zincObject);
         return zincObject;
     }
@@ -218,6 +272,7 @@ const PhyZinc = function() {
             }
             geometry.translate(position[0], position[1], position[2]);
             const zincObject = this.addGeometry(geometry, material, "floor");
+            setShadows(zincObject, false, true);
             const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
             this.addPhysicsToObject(zincObject, options);
             // Same rotation order as the geometry above: X, then Y, then Z.
@@ -347,6 +402,9 @@ const PhyZinc = function() {
     const objectAddedCallback = () => {
         return (zincObject) => {
             if (!zincObject.isPhyZincsObject) {
+                // Objects loaded by Zinc (loadGLTF/importZincMetadata) bypass
+                // addGeometry/addMesh, so give them shadows here.
+                setShadows(zincObject, true, true);
                 addedObjectCallbacks.forEach(callback => {
                     callback(zincObject);
                 })
@@ -610,6 +668,12 @@ const PhyZinc = function() {
         joints.length = 0;
         deformables.forEach(deformable => deformable.dispose());
         deformables.length = 0;
+        lights.forEach(({ light, scene }) => {
+            scene.removeObject(light.target);
+            scene.removeObject(light);
+            light.dispose();
+        });
+        lights.length = 0;
         this.physicsWorld = undefined;
         if (this.renderer) {
             this.renderer.dispose();

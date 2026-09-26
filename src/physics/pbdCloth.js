@@ -2,7 +2,8 @@ import Zinc from "zincjs";
 import { Deformable } from "./deformable.js";
 const THREE = Zinc.THREE;
 const {
-    Fn, attributeArray, instanceIndex, uniform, vec3, vec4, float, int, select, sin, Loop
+    Fn, attributeArray, instanceIndex, uniform, vec3, vec4, float, int, select, sin, Loop,
+    transformNormalToView, faceDirection
 } = THREE.TSL;
 
 // Maximum number of rigid colliders the cloth can collide against per step.
@@ -23,9 +24,11 @@ const SHAPE_TYPES = { sphere: 0, box: 1, capsule: 2 };
 // pin: 'topCorners' | 'corners' | 'edges' | 'none'.
 // colDirection/rowDirection: unit world axes the grid's columns/rows step
 // along from origin (default: a vertical curtain in the XZ plane).
+// texture: optional THREE.Texture mapped over the whole patch (UV 0..1 spans
+// the grid); null uses a built-in black and white checkerboard.
 const ClothOptions = function(gridWidth, gridHeight, spacing, origin,
     pin, gravity, damping, solverIterations, stretchCompliance, bendCompliance,
-    colDirection, rowDirection, collisionThickness, friction) {
+    colDirection, rowDirection, collisionThickness, friction, texture) {
     return {
         gridWidth: gridWidth ?? 20,
         gridHeight: gridHeight ?? 20,
@@ -44,8 +47,27 @@ const ClothOptions = function(gridWidth, gridHeight, spacing, origin,
         // Distance particles are kept from collider surfaces.
         collisionThickness: collisionThickness ?? (spacing ?? 0.1) * 0.25,
         // 0 = frictionless sliding, 1 = cloth sticks to the surface it touches.
-        friction: friction ?? 0.5
+        friction: friction ?? 0.5,
+        texture: texture ?? null
     };
+}
+
+// Default cloth texture: a checks x checks black and white checkerboard, one
+// texel per square, sampled with NearestFilter so the squares stay crisp.
+const createCheckerTexture = (checks = 8) => {
+    const data = new Uint8Array(checks * checks * 4);
+    for (let row = 0; row < checks; row++) {
+        for (let col = 0; col < checks; col++) {
+            const value = (row + col) % 2 === 0 ? 255 : 0;
+            data.set([value, value, value, 255], (row * checks + col) * 4);
+        }
+    }
+    const texture = new THREE.DataTexture(data, checks, checks);
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
 }
 
 // Grid position of particle (col, row), shared by the CPU placeholder geometry
@@ -54,7 +76,7 @@ const gridPoint = (origin, colDirection, rowDirection, spacing, col, row) => [0,
     origin[axis] + (colDirection[axis] * col + rowDirection[axis] * row) * spacing);
 
 // Static placeholder geometry: topology and UVs only matter, since the
-// material's positionNode reads the GPU buffer instead.
+// material's positionNode and normalNode read the GPU buffers instead.
 const buildGeometry = (gridWidth, gridHeight, spacing, origin, colDirection, rowDirection) => {
     const geometry = new THREE.BufferGeometry();
     const count = gridWidth * gridHeight;
@@ -148,7 +170,8 @@ class ClothPatch extends Deformable {
             options?.gridWidth, options?.gridHeight, options?.spacing, options?.origin,
             options?.pin, options?.gravity, options?.damping, options?.solverIterations,
             options?.stretchCompliance, options?.bendCompliance, options?.colDirection,
-            options?.rowDirection, options?.collisionThickness, options?.friction
+            options?.rowDirection, options?.collisionThickness, options?.friction,
+            options?.texture
         );
         const {
             gridWidth, gridHeight, spacing, origin, pin, gravity, damping, solverIterations,
@@ -382,12 +405,35 @@ class ClothPatch extends Deformable {
         // writes into positionScratchA, matching finaliseKernel's read above.
         frameNodes.push(finaliseKernel);
 
+        // Per-particle surface normal for lighting, from central differences of
+        // the settled positions (one-sided at the grid edges). cross(dRow, dCol)
+        // matches buildGeometry's (a, c, b) winding, so it points out of the
+        // front face.
+        const normal = attributeArray(particleCount, 'vec3');
+        const normalKernel = Fn(() => {
+            const i = instanceIndex.toInt();
+            const col = i.mod(gridWidthU);
+            const row = i.div(gridWidthU);
+            const rowStart = row.mul(gridWidthU);
+            const left = rowStart.add(col.sub(1).max(int(0)));
+            const right = rowStart.add(col.add(1).min(gridWidthU.sub(1)));
+            const up = row.sub(1).max(int(0)).mul(gridWidthU).add(col);
+            const down = row.add(1).min(gridHeightU.sub(1)).mul(gridWidthU).add(col);
+            const dCol = positionSettled.element(right).sub(positionSettled.element(left));
+            const dRow = positionSettled.element(down).sub(positionSettled.element(up));
+            normal.element(i).assign(dRow.cross(dCol).normalize());
+        })().compute(particleCount);
+        frameNodes.push(normalKernel);
+
         const geometry = buildGeometry(gridWidth, gridHeight, spacing, origin, colDirection, rowDirection);
-        const material = new THREE.MeshBasicNodeMaterial({
-            color: new THREE.Color("rgb(200, 60, 60)"),
+        const material = new THREE.MeshLambertNodeMaterial({
             side: THREE.DoubleSide
         });
         material.positionNode = positionSettled.toAttribute();
+        // The mesh has an identity transform, so the world-space normal buffer is
+        // also local space. normalNode is in view space and, unlike the built-in
+        // normal, isn't flipped for back faces, so faceDirection does that here.
+        material.normalNode = transformNormalToView(normal.toAttribute()).mul(faceDirection);
         const mesh = new THREE.Mesh(geometry, material);
         // The CPU bounding volume only reflects the placeholder geometry, not the
         // GPU-deformed surface, so culling against it can wrongly hide the cloth.
@@ -401,9 +447,12 @@ class ClothPatch extends Deformable {
         this.positionSettled = positionSettled;
         this.colliderData = colliderData;
         this.initKernel = initKernel;
+        this.normalKernel = normalKernel;
         this.frameNodes = frameNodes;
         this.geometry = geometry;
         this.material = material;
+        this.defaultTexture = null;
+        this.setTexture(opts.texture);
         this.uniforms = {
             time: timeU, wind: windU, gust: gustU,
             stretchAlphaTilde: stretchAlphaTildeU, bendAlphaTilde: bendAlphaTildeU,
@@ -421,6 +470,7 @@ class ClothPatch extends Deformable {
     // rendered or step() is called, so no frame compute reads unseeded buffers.
     async initialise() {
         await this.renderer.getThreeJSRenderer().computeAsync(this.initKernel);
+        await this.renderer.getThreeJSRenderer().computeAsync(this.normalKernel);
         this.refreshPickSnapshot();
     }
 
@@ -529,9 +579,21 @@ class ClothPatch extends Deformable {
         this.uniforms.bendAlphaTilde.value = bend / dtSq;
     }
 
+    // Replaces the cloth's texture; null restores the default checkerboard.
+    // The caller keeps ownership of textures it passes in: dispose() only frees
+    // the default checkerboard, which is created on first use.
+    setTexture(texture) {
+        if (!texture && !this.defaultTexture) {
+            this.defaultTexture = createCheckerTexture();
+        }
+        this.material.map = texture ?? this.defaultTexture;
+        this.material.needsUpdate = true;
+    }
+
     dispose() {
         this.geometry.dispose();
         this.material.dispose();
+        this.defaultTexture?.dispose();
     }
 }
 

@@ -22,6 +22,21 @@ export async function startClothCollisionScene(mount, gravity) {
   phyZinc.addBox([-0.45, -0.25, floorZ + 0.2], [0.4, 0.4, 0.4]);
   phyZinc.addSphere([0.5, -0.45, 0.8], 0.12, 24, 24);
 
+  // Spotlight above and in front of the bodies, so the cloth and bodies cast
+  // shadows onto the floor and each other. Dim Zinc's camera-following
+  // directional light so it doesn't wash those shadows out.
+  phyZinc.addSpotLight({
+    position: [1.2, -1.5, 1.8],
+    target: [0, 0, floorZ],
+    intensity: 15,
+    angle: Math.PI / 5,
+    penumbra: 0.4,
+    shadowMapSize: 2048,
+    shadowNear: 0.5,
+    shadowFar: 6,
+  });
+  scene.directionalLight.intensity = 0.3 * Math.PI;
+
   // Horizontal patch in the XY plane, above the bodies, pinned nowhere so it
   // falls and drapes over them.
   const gridSize = 24;

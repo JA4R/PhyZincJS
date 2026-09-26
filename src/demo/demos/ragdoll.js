@@ -112,7 +112,18 @@ export async function startRagdollScene(mount, gravity) {
   const renderer = new Zinc.Renderer(mount, window);
   Zinc.defaultMaterialColor = 0xFFFF9C;
   await phyZinc.attach(renderer);
-  phyZinc.startNewScene("test");
+  const scene = phyZinc.startNewScene("ragdoll");
+  phyZinc.addSpotLight({
+    position: [0.0, 0.0, 3.0],
+    target: [0, 0, 0],
+    intensity: 15,
+    angle: Math.PI / 5,
+    penumbra: 0.4,
+    shadowMapSize: 2048,
+    shadowNear: 0.5,
+    shadowFar: 6,
+  });
+  scene.directionalLight.intensity = 0.3 * Math.PI;
   phyZinc.setGravity(gravity);
   loadGLTF(phyZinc);
   return phyZinc;
