@@ -424,11 +424,26 @@ class ClothPatch extends Deformable {
         this.refreshPickSnapshot();
     }
 
+    // Picking needs a CPU copy of the positions, read back from the GPU every
+    // step, so disabling it also stops that readback and drops the copy.
+    setPickingEnabled(enabled) {
+        super.setPickingEnabled(enabled);
+        if (enabled) {
+            this.refreshPickSnapshot();
+        } else {
+            this.release();
+            this.pickSnapshot = null;
+        }
+    }
+
     refreshPickSnapshot() {
-        if (this.readbackPending) return;
+        if (!this.pickingEnabled || this.readbackPending) return;
         this.readbackPending = true;
         this.renderer.getThreeJSRenderer().getArrayBufferAsync(this.positionSettled.value)
-            .then(buffer => { this.pickSnapshot = new Float32Array(buffer); })
+            // Ignore a readback that lands after picking was disabled.
+            .then(buffer => {
+                if (this.pickingEnabled) this.pickSnapshot = new Float32Array(buffer);
+            })
             .catch(() => {})
             .finally(() => { this.readbackPending = false; });
     }
@@ -442,7 +457,7 @@ class ClothPatch extends Deformable {
     // Returns the particle within one grid spacing of the ray that is nearest
     // the camera, as { index, point, distance } (distance along the ray), or null.
     pick(ray) {
-        if (!this.pickSnapshot) return null;
+        if (!this.pickingEnabled || !this.pickSnapshot) return null;
         const maxDistanceSq = this.options.spacing * this.options.spacing;
         const point = new THREE.Vector3();
         const toPoint = new THREE.Vector3();

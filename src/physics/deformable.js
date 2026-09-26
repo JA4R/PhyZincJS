@@ -11,6 +11,18 @@ class Deformable {
     constructor() {
         // THREE.Mesh added to the scene by PhyZinc.addDeformable().
         this.mesh = null;
+        this.pickingEnabled = true;
+    }
+
+    // Whether PhyZinc should offer this deformable to mouse picking/dragging.
+    // Subclasses that pay for picking (e.g. a GPU readback) override this to
+    // start or stop that work, calling super.setPickingEnabled() first.
+    setPickingEnabled(enabled) {
+        this.pickingEnabled = enabled;
+    }
+
+    isPickingEnabled() {
+        return this.pickingEnabled;
     }
 
     // Advances the simulation by one fixed time step.

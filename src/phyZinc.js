@@ -410,6 +410,7 @@ const PhyZinc = function() {
             let deformableHit = null;
             let hitDeformable = null;
             deformables.forEach(deformable => {
+                if (!deformable.isPickingEnabled()) return;
                 const hit = deformable.pick(raycaster.ray);
                 if (hit && (!deformableHit || hit.distance < deformableHit.distance)) {
                     deformableHit = hit;
