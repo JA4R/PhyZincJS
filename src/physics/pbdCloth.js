@@ -141,6 +141,12 @@ const xpbdConstraint = (i, selfPos, selfInvMass, readBuf, invMassOf, valid, neig
     return { dLambda, correction };
 }
 
+// normalize() that returns zero, not NaN, for a (near-)zero vector. WGSL's
+// normalize(0) is NaN, and one NaN particle spreads through the constraints
+// until the whole cloth vanishes. Multiplying a NaN normal by zero (no wind,
+// no penetration) is still NaN, so the guard is needed even where unused.
+const safeNormalize = (v) => v.div(v.length().max(1e-12));
+
 // Rotates v by unit quaternion q (xyz = vector part, w = scalar part):
 // v' = v + w·t + u×t, with u = q.xyz and t = 2·(u×v).
 const rotateByQuaternion = (q, v) => {
@@ -242,7 +248,7 @@ class ClothPatch extends Deformable {
                 localDistance(local.add(vec3(0, 0, h)), type, params)
                     .sub(localDistance(local.sub(vec3(0, 0, h)), type, params))
             );
-            const normal = rotateByQuaternion(rotation, gradient.normalize());
+            const normal = rotateByQuaternion(rotation, safeNormalize(gradient));
             const distance = localDistance(local, type, params);
             const bodyVelocity = colliderData.element(base.add(3)).xyz;
             return { distance, normal, bodyVelocity };
@@ -296,7 +302,7 @@ class ClothPatch extends Deformable {
             const down = i.add(row.lessThan(gridHeightU.sub(1)).select(gridWidthU, int(0)));
             const tangentU = positionSettled.element(right).sub(positionSettled.element(left));
             const tangentV = positionSettled.element(down).sub(positionSettled.element(up));
-            const normal = tangentU.cross(tangentV).normalize();
+            const normal = safeNormalize(tangentU.cross(tangentV));
 
             // Aerodynamic-style force: only the component of relative wind along the
             // normal pushes the cloth (air sliding along the surface does little),
@@ -421,7 +427,7 @@ class ClothPatch extends Deformable {
             const down = row.add(1).min(gridHeightU.sub(1)).mul(gridWidthU).add(col);
             const dCol = positionSettled.element(right).sub(positionSettled.element(left));
             const dRow = positionSettled.element(down).sub(positionSettled.element(up));
-            normal.element(i).assign(dRow.cross(dCol).normalize());
+            normal.element(i).assign(safeNormalize(dRow.cross(dCol)));
         })().compute(particleCount);
         frameNodes.push(normalKernel);
 
@@ -514,6 +520,9 @@ class ClothPatch extends Deformable {
         let best = null;
         for (let i = 0; i < this.particleCount; i++) {
             point.fromArray(this.pickSnapshot, i * 4);
+            // NaN fails every comparison below, so without this a NaN particle
+            // would always be "hit" and every click would grab the cloth.
+            if (!Number.isFinite(point.x + point.y + point.z)) continue;
             const along = toPoint.copy(point).sub(ray.origin).dot(ray.direction);
             if (along < 0 || ray.distanceSqToPoint(point) > maxDistanceSq) continue;
             if (!best || along < best.distance) {
