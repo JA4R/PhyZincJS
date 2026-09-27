@@ -12,6 +12,26 @@ class Deformable {
         // THREE.Mesh added to the scene by PhyZinc.addDeformable().
         this.mesh = null;
         this.pickingEnabled = true;
+        this.collisionFeedbackEnabled = false;
+    }
+
+    // Whether this deformable pushes back on the rigid bodies it touches
+    // (two-way coupling). Off by default, since it costs a GPU readback per
+    // step; subclasses override to start/stop that work, calling super first.
+    setCollisionFeedback(enabled) {
+        this.collisionFeedbackEnabled = enabled;
+    }
+
+    isCollisionFeedbackEnabled() {
+        return this.collisionFeedbackEnabled;
+    }
+
+    // Impulses this deformable has applied to rigid colliders since the last
+    // call, as [{ rigidBody, impulse: [x, y, z], torque: [x, y, z] }] (N·s and
+    // N·m·s, world space; torque about the body's centre). PhyZinc applies them
+    // before each Rapier step.
+    takeColliderImpulses() {
+        return [];
     }
 
     // Whether PhyZinc should offer this deformable to mouse picking/dragging.

@@ -2,30 +2,27 @@ import Zinc from "zincjs";
 import { PhyZinc } from "../../phyZinc.js"
 import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
 
-// A cloth dropped over resting rigid bodies, with a ball falling onto it.
-// Coupling is two-way: the cloth also pushes back on the bodies it touches.
-// Drag the bodies to push them around under the cloth, or drag the cloth to
-// pull at them.
-export async function startClothCollisionScene(mount, gravity) {
+// A cloth pinned at its four corners like a trampoline, with bodies dropped
+// onto it. Collision feedback (two-way coupling) is what lets the cloth catch
+// them; without it they would punch straight through.
+export async function startClothTrampolineScene(mount, gravity) {
   const phyZinc = new PhyZinc();
   await phyZinc.initialise();
   phyZinc.pause(true);
   const renderer = new Zinc.Renderer(mount, window);
   Zinc.defaultMaterialColor = 0xFFFF9C;
   await phyZinc.attach(renderer);
-  const scene = phyZinc.startNewScene("cloth-collision");
+  const scene = phyZinc.startNewScene("cloth-trampoline");
   phyZinc.setGravity(gravity);
 
   const floorZ = -1.0;
   phyZinc.addFloor([0, 0, floorZ], [3, 3]);
-  // Densities (kg/m³) chosen so the bodies outweigh the ~0.58 kg cloth.
-  phyZinc.addSphere([0.25, 0.1, floorZ + 0.3], 0.3, 32, 32, 50);
-  phyZinc.addBox([-0.45, -0.25, floorZ + 0.2], [0.4, 0.4, 0.4], 50);
-  phyZinc.addSphere([0.5, -0.45, 0.8], 0.12, 24, 24, 50);
+  // Densities (kg/m³) give bodies of roughly 0.1-0.4 kg, comparable to the
+  // ~0.58 kg cloth, so they visibly dent it without tearing through.
+  phyZinc.addSphere([0.1, 0.05, 0.9], 0.15, 32, 32, 30);
+  phyZinc.addSphere([-0.35, 0.3, 1.4], 0.1, 24, 24, 30);
+  phyZinc.addBox([0.35, -0.3, 1.8], [0.2, 0.2, 0.2], 30);
 
-  // Spotlight above and in front of the bodies, so the cloth and bodies cast
-  // shadows onto the floor and each other. Dim Zinc's camera-following
-  // directional light so it doesn't wash those shadows out.
   phyZinc.addSpotLight({
     position: [1.2, -1.5, 1.8],
     target: [0, 0, floorZ],
@@ -38,25 +35,23 @@ export async function startClothCollisionScene(mount, gravity) {
   });
   scene.directionalLight.intensity = 0.3 * Math.PI;
 
-  // Horizontal patch in the XY plane, above the bodies, pinned nowhere so it
-  // falls and drapes over them.
+  // Horizontal patch in the XY plane, pinned at its corners, above the floor.
   const gridSize = 24;
   const spacing = 0.075;
   const halfSpan = (gridSize - 1) * spacing / 2;
   const clothOptions = ClothOptions(gridSize, gridSize, spacing, [-halfSpan, halfSpan, 0]);
-  clothOptions.pin = 'none';
+  clothOptions.pin = 'corners';
   clothOptions.rowDirection = [0, -1, 0];
   clothOptions.gravity = [0, 0, gravity];
   const cloth = new ClothPatch(renderer, clothOptions);
   await cloth.initialise();
-  // Two-way coupling: the cloth's weight and friction push back on the bodies.
   cloth.setCollisionFeedback(true);
   phyZinc.addDeformable(cloth, "cloth");
   phyZinc.startSimulation();
 
   scene.getZincCameraControls().setCurrentCameraSettings({
-    eyePosition: [0, -3.2, 1.0],
-    targetPosition: [0, 0, floorZ + 0.3],
+    eyePosition: [0, -3.2, 1.2],
+    targetPosition: [0, 0, -0.1],
     upVector: [0, 0, 1],
   });
 

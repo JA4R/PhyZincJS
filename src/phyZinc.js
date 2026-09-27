@@ -193,12 +193,15 @@ const PhyZinc = function() {
             shape.position = [t.x, t.y, t.z];
             shape.rotation = [r.x, r.y, r.z, r.w];
             shape.linearVelocity = [v.x, v.y, v.z];
+            // Lets deformables with collision feedback push back on the body.
+            shape.rigidBody = zincObject.rigidBody;
             shapes.push(shape);
         });
         return shapes;
     }
 
-    this.addSphere = (position, radius, widthSegments, heightSegments) => {
+    // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
+    this.addSphere = (position, radius, widthSegments, heightSegments, density = 1.0) => {
         if (this.rapier) {
             const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
             const material = new THREE.MeshPhongNodeMaterial({
@@ -213,6 +216,7 @@ const PhyZinc = function() {
                     .setLinearDamping(0.1);
                 const rigidBody = world.createRigidBody(rbDesc);
                 const collider = this.rapier.ColliderDesc.ball(radius)
+                    .setDensity(density)
                     .setFriction(0.1)
                     .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
                     // .setTranslation(0, 0, 0)
@@ -227,7 +231,8 @@ const PhyZinc = function() {
         }
     }
 
-    this.addBox = (position, dimension) => {
+    // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
+    this.addBox = (position, dimension, density = 1.0) => {
         if (this.rapier) {
             const geometry = new THREE.BoxGeometry(...dimension);
             const material = new THREE.MeshPhongNodeMaterial({
@@ -243,6 +248,7 @@ const PhyZinc = function() {
                 const rigidBody = world.createRigidBody(rbDesc);
                 const collider = this.rapier.ColliderDesc
                     .cuboid(dimension[0] / 2, dimension[1] / 2, dimension[2] / 2)
+                    .setDensity(density)
                     .setFriction(0.1)
                     .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
                     .setRestitution(0.2)
@@ -597,10 +603,25 @@ const PhyZinc = function() {
         this.enableDragging();
     }
 
+    // Two-way coupling: forces deformables applied to rigid bodies. Only
+    // dynamic bodies respond; kinematic (e.g. being dragged) and fixed ones don't.
+    const applyDeformableImpulses = () => {
+        const Dynamic = this.rapier.RigidBodyType.Dynamic;
+        deformables.forEach(deformable => {
+            if (!deformable.isCollisionFeedbackEnabled()) return;
+            deformable.takeColliderImpulses().forEach(({ rigidBody, impulse, torque }) => {
+                if (!rigidBody.isValid() || rigidBody.bodyType() !== Dynamic) return;
+                rigidBody.applyImpulse({ x: impulse[0], y: impulse[1], z: impulse[2] }, true);
+                rigidBody.applyTorqueImpulse({ x: torque[0], y: torque[1], z: torque[2] }, true);
+            });
+        });
+    }
+
     const updatePhysicalWorld = () => {
         return () => {
             if (paused) return;
             if (this.physicsWorld) {
+                applyDeformableImpulses();
                 this.physicsWorld.step();
                 objects.forEach(syncMorphToRigidBody);
             }

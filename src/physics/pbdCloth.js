@@ -2,7 +2,7 @@ import Zinc from "zincjs";
 import { Deformable } from "./deformable.js";
 const THREE = Zinc.THREE;
 const {
-    Fn, attributeArray, instanceIndex, uniform, vec3, vec4, float, int, select, sin, Loop,
+    Fn, attributeArray, instanceIndex, uniform, vec3, vec4, float, int, select, sin, Loop, If, atomicAdd,
     transformNormalToView, faceDirection
 } = THREE.TSL;
 
@@ -12,6 +12,14 @@ const MAX_COLLIDERS = 64;
 const COLLIDER_STRIDE = 4;
 // Shape type codes, matching Rapier's ShapeType numbering.
 const SHAPE_TYPES = { sphere: 0, box: 1, capsule: 2 };
+// int slots per collider in the impulse buffer: [Jx, Jy, Jz, τx, τy, τz, -, -].
+const IMPULSE_STRIDE = 8;
+// WGSL atomics are integer-only, so impulses are summed as fixed-point i32:
+// 1e8 units per N·s gives ±21 N·s per collider per step, far above anything a
+// cloth transfers, with 1e-8 N·s resolution.
+const IMPULSE_SCALE = 1e8;
+// Impulse readbacks allowed in flight; a step beyond this is not fed back.
+const MAX_IMPULSE_READBACKS = 4;
 
 // Proof-of-concept WebGPU XPBD (extended Position-Based-Dynamics) cloth patch.
 // Stretch/bend stiffness is set by compliance (inverse stiffness, α = 1/k), so
@@ -26,9 +34,13 @@ const SHAPE_TYPES = { sphere: 0, box: 1, capsule: 2 };
 // along from origin (default: a vertical curtain in the XZ plane).
 // texture: optional THREE.Texture mapped over the whole patch (UV 0..1 spans
 // the grid); null uses a built-in black and white checkerboard.
+// particleMass: kg per particle (default 1 g). Used by XPBD and by the
+// impulses fed back to rigid bodies when collision feedback is enabled.
+// feedbackScale: multiplier on those impulses (1 = physical).
 const ClothOptions = function(gridWidth, gridHeight, spacing, origin,
     pin, gravity, damping, solverIterations, stretchCompliance, bendCompliance,
-    colDirection, rowDirection, collisionThickness, friction, texture) {
+    colDirection, rowDirection, collisionThickness, friction, texture,
+    particleMass, feedbackScale) {
     return {
         gridWidth: gridWidth ?? 20,
         gridHeight: gridHeight ?? 20,
@@ -38,17 +50,21 @@ const ClothOptions = function(gridWidth, gridHeight, spacing, origin,
         gravity: gravity ?? [0, 0, -9.81],
         damping: damping ?? 0.98,
         solverIterations: solverIterations ?? 20,
-        // Compliance α = 1/stiffness (m/N, unit particle mass). 0 = rigid link;
-        // larger = softer. Bending is much softer than stretch, like real fabric.
-        stretchCompliance: stretchCompliance ?? 1e-5,
-        bendCompliance: bendCompliance ?? 1e-3,
+        // Compliance α = 1/stiffness (m/N). 0 = rigid link; larger = softer.
+        // Bending is much softer than stretch, like real fabric. XPBD weighs α
+        // against inverse mass, so these defaults suit the default 1 g
+        // particles; scale them with particleMass to keep the same look.
+        stretchCompliance: stretchCompliance ?? 1e-8,
+        bendCompliance: bendCompliance ?? 1e-6,
         colDirection: colDirection ?? [1, 0, 0],
         rowDirection: rowDirection ?? [0, 0, -1],
         // Distance particles are kept from collider surfaces.
         collisionThickness: collisionThickness ?? (spacing ?? 0.1) * 0.25,
         // 0 = frictionless sliding, 1 = cloth sticks to the surface it touches.
         friction: friction ?? 0.5,
-        texture: texture ?? null
+        texture: texture ?? null,
+        particleMass: particleMass ?? 0.001,
+        feedbackScale: feedbackScale ?? 1
     };
 }
 
@@ -177,11 +193,12 @@ class ClothPatch extends Deformable {
             options?.pin, options?.gravity, options?.damping, options?.solverIterations,
             options?.stretchCompliance, options?.bendCompliance, options?.colDirection,
             options?.rowDirection, options?.collisionThickness, options?.friction,
-            options?.texture
+            options?.texture, options?.particleMass, options?.feedbackScale
         );
         const {
             gridWidth, gridHeight, spacing, origin, pin, gravity, damping, solverIterations,
-            stretchCompliance, bendCompliance, colDirection, rowDirection, collisionThickness, friction
+            stretchCompliance, bendCompliance, colDirection, rowDirection, collisionThickness, friction,
+            particleMass
         } = opts;
         const particleCount = gridWidth * gridHeight;
 
@@ -227,6 +244,30 @@ class ClothPatch extends Deformable {
         const colliderCountU = uniform(0, 'int');
         const thicknessU = uniform(collisionThickness, 'float');
         const frictionU = uniform(friction, 'float');
+        // Collision feedback: impulses the cloth applies to each collider this
+        // step, summed with atomics (many particles touch one collider at once)
+        // and read back by step(). feedbackU is 0 when feedback is disabled.
+        const impulseData = attributeArray(MAX_COLLIDERS * IMPULSE_STRIDE, 'int').toAtomic();
+        const feedbackU = uniform(0.0, 'float');
+        // Mass for momentum bookkeeping: 0 for pinned and grabbed particles,
+        // which are held by an "infinite" hand and so transfer nothing.
+        const massOf = (index) => {
+            const w = invMassOf(index);
+            return select(w.greaterThan(0.0), float(1.0).div(w), float(0.0));
+        }
+        // Adds impulse J (N·s, world space, applied at point p) to collider k,
+        // with its torque about the collider's centre.
+        const addColliderImpulse = (k, impulse, p, center) => {
+            const scaled = impulse.mul(feedbackU).mul(IMPULSE_SCALE);
+            const torque = p.sub(center).cross(impulse).mul(feedbackU).mul(IMPULSE_SCALE);
+            const base = k.mul(IMPULSE_STRIDE);
+            atomicAdd(impulseData.element(base), scaled.x.round().toInt());
+            atomicAdd(impulseData.element(base.add(1)), scaled.y.round().toInt());
+            atomicAdd(impulseData.element(base.add(2)), scaled.z.round().toInt());
+            atomicAdd(impulseData.element(base.add(3)), torque.x.round().toInt());
+            atomicAdd(impulseData.element(base.add(4)), torque.y.round().toInt());
+            atomicAdd(impulseData.element(base.add(5)), torque.z.round().toInt());
+        }
 
         // Distance and outward normal from world point p to collider k's surface.
         // The normal is the central-difference gradient of the local distance
@@ -251,7 +292,7 @@ class ClothPatch extends Deformable {
             const normal = rotateByQuaternion(rotation, safeNormalize(gradient));
             const distance = localDistance(local, type, params);
             const bodyVelocity = colliderData.element(base.add(3)).xyz;
-            return { distance, normal, bodyVelocity };
+            return { distance, normal, bodyVelocity, center: header.xyz };
         }
 
         const initKernel = Fn(() => {
@@ -281,7 +322,7 @@ class ClothPatch extends Deformable {
                 throw new Error(`Unknown cloth pin mode "${pin}"`);
             }
             const pinned = pinnedByMode[pin]();
-            invMass.element(i).assign(select(pinned, float(0.0), float(1.0)));
+            invMass.element(i).assign(select(pinned, float(0.0), float(1.0 / particleMass)));
         })().compute(particleCount);
 
         const predictKernel = Fn(() => {
@@ -314,7 +355,10 @@ class ClothPatch extends Deformable {
             const relativeWind = windU.mul(gust).sub(vel);
             const windForce = normal.mul(normal.dot(relativeWind));
 
-            vel.assign(vel.add(gravityU.add(windForce).mul(dtU).mul(selfInvMass)).mul(dampingU));
+            // Gravity and wind are accelerations; the mask only stops pinned or
+            // grabbed particles from moving.
+            const movable = select(selfInvMass.greaterThan(0.0), float(1.0), float(0.0));
+            vel.assign(vel.add(gravityU.add(windForce).mul(dtU).mul(movable)).mul(dampingU));
             velocity.element(i).assign(vel);
             // XPBD: λ accumulates over one timestep's iterations, reset every step.
             lambdaStructural.element(i).assign(vec4(0, 0, 0, 0));
@@ -369,10 +413,18 @@ class ClothPatch extends Deformable {
             // iteration so the distance constraints solve around the obstacles.
             const newPos = selfPos.add(safeCorrection).toVar();
             const movable = select(selfInvMass.greaterThan(0.0), float(1.0), float(0.0));
+            const selfMass = massOf(i);
             Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
                 const contact = colliderContact(newPos, k);
                 const penetration = thicknessU.sub(contact.distance).max(0.0);
-                newPos.addAssign(contact.normal.mul(penetration).mul(movable));
+                const push = contact.normal.mul(penetration).mul(movable).toVar();
+                newPos.addAssign(push);
+                // Momentum conservation: the particle gained m·Δx/Δt, so the
+                // body receives the opposite. Summed over every iteration this
+                // is the contact constraint's accumulated λ.
+                If(penetration.greaterThan(0.0).and(feedbackU.greaterThan(0.0)), () => {
+                    addColliderImpulse(k, push.mul(selfMass).div(dtU).negate(), newPos, contact.center);
+                });
             });
 
             writeBuf.element(i).assign(newPos);
@@ -386,6 +438,7 @@ class ClothPatch extends Deformable {
             const oldPos = positionSettled.element(i).toVar();
             const finalPos = positionScratchA.element(i).toVar();
             const vel = finalPos.sub(oldPos).div(dtU).toVar();
+            const selfMass = massOf(i);
 
             // Friction, applied once per step at velocity level: for particles in
             // contact, remove a fraction of the tangential velocity relative to the
@@ -396,7 +449,12 @@ class ClothPatch extends Deformable {
                     float(1.0), float(0.0));
                 const relative = vel.sub(contact.bodyVelocity);
                 const tangential = relative.sub(contact.normal.mul(relative.dot(contact.normal)));
-                vel.subAssign(tangential.mul(frictionU).mul(touching));
+                const frictionDelta = tangential.mul(frictionU).mul(touching).toVar();
+                vel.subAssign(frictionDelta);
+                // The tangential momentum the cloth lost goes into the body.
+                If(touching.greaterThan(0.0).and(feedbackU.greaterThan(0.0)), () => {
+                    addColliderImpulse(k, frictionDelta.mul(selfMass), finalPos, contact.center);
+                });
             });
 
             velocity.element(i).assign(vel);
@@ -452,6 +510,15 @@ class ClothPatch extends Deformable {
         this.particleCount = particleCount;
         this.positionSettled = positionSettled;
         this.colliderData = colliderData;
+        this.impulseData = impulseData;
+        this.feedbackScale = opts.feedbackScale;
+        // Shapes currently in each collider slot, so a readback's slot k can
+        // be matched back to its rigid body.
+        this.colliderSlots = [];
+        this.pendingImpulses = [];
+        this.impulseReadbacks = 0;
+        // Bumped when feedback is disabled, so late readbacks are discarded.
+        this.feedbackGeneration = 0;
         this.initKernel = initKernel;
         this.normalKernel = normalKernel;
         this.frameNodes = frameNodes;
@@ -463,6 +530,7 @@ class ClothPatch extends Deformable {
             time: timeU, wind: windU, gust: gustU,
             stretchAlphaTilde: stretchAlphaTildeU, bendAlphaTilde: bendAlphaTildeU,
             grabIndex: grabIndexU, grabTarget: grabTargetU, colliderCount: colliderCountU,
+            feedback: feedbackU,
         };
 
         // CPU copy of the particle positions, used only for mouse picking. Read
@@ -506,8 +574,60 @@ class ClothPatch extends Deformable {
 
     step() {
         this.uniforms.time.value += this.dt;
+        const feedback = this.collisionFeedbackEnabled &&
+            this.impulseReadbacks < MAX_IMPULSE_READBACKS;
+        this.uniforms.feedback.value = feedback ? this.feedbackScale : 0;
+        if (feedback) {
+            // The CPU copy is never written, so this re-uploads zeros: a
+            // cleared accumulator for this step.
+            this.impulseData.value.needsUpdate = true;
+        }
         this.renderer.getThreeJSRenderer().compute(this.frameNodes);
+        if (feedback) {
+            this.readBackImpulses();
+        }
         this.refreshPickSnapshot();
+    }
+
+    // getArrayBufferAsync submits its GPU copy synchronously (before its first
+    // await), so this captures exactly this step's impulses even though the
+    // next step clears the buffer before the result arrives.
+    readBackImpulses() {
+        const slots = this.colliderSlots;
+        const generation = this.feedbackGeneration;
+        this.impulseReadbacks++;
+        this.renderer.getThreeJSRenderer().getArrayBufferAsync(this.impulseData.value)
+            .then(buffer => {
+                if (generation !== this.feedbackGeneration) return;
+                const data = new Int32Array(buffer);
+                slots.forEach((shape, k) => {
+                    if (!shape.rigidBody) return;
+                    const base = k * IMPULSE_STRIDE;
+                    const values = Array.from(data.subarray(base, base + 6), v => v / IMPULSE_SCALE);
+                    if (values.every(v => v === 0)) return;
+                    this.pendingImpulses.push({
+                        rigidBody: shape.rigidBody,
+                        impulse: values.slice(0, 3),
+                        torque: values.slice(3, 6),
+                    });
+                });
+            })
+            .catch(() => {})
+            .finally(() => { this.impulseReadbacks--; });
+    }
+
+    setCollisionFeedback(enabled) {
+        super.setCollisionFeedback(enabled);
+        if (!enabled) {
+            this.feedbackGeneration++;
+            this.pendingImpulses = [];
+        }
+    }
+
+    takeColliderImpulses() {
+        const impulses = this.pendingImpulses;
+        this.pendingImpulses = [];
+        return impulses;
     }
 
     // Returns the particle within one grid spacing of the ray that is nearest
@@ -560,6 +680,7 @@ class ClothPatch extends Deformable {
     // anything past MAX_COLLIDERS is ignored. Call before step() each frame.
     setColliders(shapes) {
         const data = this.colliderData.value.array;
+        const slots = [];
         let count = 0;
         for (const shape of shapes) {
             if (count >= MAX_COLLIDERS) break;
@@ -575,8 +696,12 @@ class ClothPatch extends Deformable {
                 ...params, 0,
                 ...velocity, 0,
             ], count * COLLIDER_STRIDE * 4);
+            slots.push(shape);
             count++;
         }
+        // A new array (not mutated in place): in-flight readbacks keep the
+        // slot list of the step they were taken for.
+        this.colliderSlots = slots;
         this.uniforms.colliderCount.value = count;
         this.colliderData.value.needsUpdate = true;
     }
