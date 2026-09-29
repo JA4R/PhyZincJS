@@ -1,6 +1,8 @@
 import Zinc from "zincjs";
 import { PhyZinc } from "../../phyZinc.js"
 import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
+import { loadDummyBody } from "./sceneHelpers.js"
+
 
 // A cloth pinned at its four corners like a trampoline, with bodies dropped
 // onto it. Collision feedback (two-way coupling) is what lets the cloth catch
@@ -15,13 +17,15 @@ export async function startClothTrampolineScene(mount, gravity) {
   const scene = phyZinc.startNewScene("cloth-trampoline");
   phyZinc.setGravity(gravity);
 
-  const floorZ = -1.0;
+  const floorZ = -2.0;
   phyZinc.addFloor([0, 0, floorZ], [3, 3]);
   // Densities (kg/m³) give bodies of roughly 0.1-0.4 kg, comparable to the
   // ~0.58 kg cloth, so they visibly dent it without tearing through.
   phyZinc.addSphere([0.1, 0.05, 0.9], 0.15, 32, 32, 30);
   phyZinc.addSphere([-0.35, 0.3, 1.4], 0.1, 24, 24, 30);
   phyZinc.addBox([0.35, -0.3, 1.8], [0.2, 0.2, 0.2], 30);
+
+  //loadDummyBody(phyZinc);
 
   phyZinc.addSpotLight({
     position: [1.2, -1.5, 1.8],
@@ -37,16 +41,18 @@ export async function startClothTrampolineScene(mount, gravity) {
 
   // Horizontal patch in the XY plane, pinned at its corners, above the floor.
   const gridSize = 24;
-  const spacing = 0.075;
+  const spacing = 0.1;
   const halfSpan = (gridSize - 1) * spacing / 2;
-  const clothOptions = ClothOptions(gridSize, gridSize, spacing, [-halfSpan, halfSpan, 0]);
+  const clothOptions = ClothOptions(gridSize, gridSize, spacing, [-halfSpan, halfSpan, 0.03]);
   clothOptions.pin = 'corners';
   clothOptions.rowDirection = [0, -1, 0];
   clothOptions.gravity = [0, 0, gravity];
+  clothOptions.particleMass = 0.001;
   const cloth = new ClothPatch(renderer, clothOptions);
   await cloth.initialise();
   cloth.setCollisionFeedback(true);
   phyZinc.addDeformable(cloth, "cloth");
+
   phyZinc.startSimulation();
 
   scene.getZincCameraControls().setCurrentCameraSettings({
@@ -54,6 +60,7 @@ export async function startClothTrampolineScene(mount, gravity) {
     targetPosition: [0, 0, -0.1],
     upVector: [0, 0, 1],
   });
+  
 
   return phyZinc;
 }
