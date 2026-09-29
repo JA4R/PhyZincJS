@@ -10,8 +10,11 @@ const {
 const MAX_COLLIDERS = 64;
 // vec4 slots per collider in the collider buffer (see setColliders).
 const COLLIDER_STRIDE = 4;
-// Shape type codes, matching Rapier's ShapeType numbering.
-const SHAPE_TYPES = { sphere: 0, box: 1, capsule: 2 };
+// Shape type codes. The first three match Rapier's ShapeType numbering;
+// convexHull does not (Rapier's is 9), as the codes are only read by the kernel.
+const SHAPE_TYPES = { sphere: 0, box: 1, capsule: 2, convexHull: 3 };
+// Total face planes shared by all convex-hull colliders per step.
+const MAX_HULL_PLANES = 2048;
 // int slots per collider in the impulse buffer: [Jx, Jy, Jz, τx, τy, τz, -, -].
 const IMPULSE_STRIDE = 8;
 // WGSL atomics are integer-only, so impulses are summed as fixed-point i32:
@@ -174,6 +177,7 @@ const rotateByQuaternion = (q, v) => {
 // (negative inside). All three shapes are evaluated and one is selected, which
 // avoids divergent branches on the GPU. params: sphere x=radius; box
 // xyz=half extents; capsule x=half height (along local Y, as in Rapier), y=radius.
+// Convex hulls are handled separately in colliderContact.
 const localDistance = (local, type, params) => {
     const dSphere = local.length().sub(params.x);
     const q = local.abs().sub(params.xyz);
@@ -217,8 +221,12 @@ class ClothPatch extends Deformable {
         const lambdaBending = attributeArray(particleCount, 'vec4');
         // Rigid colliders, written from the CPU each step by setColliders(). Per
         // collider, COLLIDER_STRIDE vec4s: [position, type], [rotation quaternion],
-        // [shape params], [linear velocity, unused].
+        // [shape params], [linear velocity, unused]. Convex hulls' params are
+        // x=first plane, y=plane count into hullPlanes.
         const colliderData = attributeArray(MAX_COLLIDERS * COLLIDER_STRIDE, 'vec4');
+        // Convex-hull face planes in their collider's local frame: xyz=outward
+        // normal, w=offset d (n·p = d on the face).
+        const hullPlanes = attributeArray(MAX_HULL_PLANES, 'vec4');
 
         const gridWidthU = uniform(gridWidth, 'int');
         const gridHeightU = uniform(gridHeight, 'int');
@@ -270,8 +278,11 @@ class ClothPatch extends Deformable {
         }
 
         // Distance and outward normal from world point p to collider k's surface.
-        // The normal is the central-difference gradient of the local distance
-        // field, rotated back to world space — one generic path for every shape.
+        // For analytic shapes the normal is the central-difference gradient of
+        // the local distance field. A convex hull's distance is the max over its
+        // face planes of n·p - d (exact inside and on faces, slightly short
+        // near outside edges and corners), with that plane's n as the normal.
+        // Every thread tests the same collider k, so the branch does not diverge.
         const colliderContact = (p, k) => {
             const base = k.mul(COLLIDER_STRIDE);
             const header = colliderData.element(base).toVar();
@@ -280,17 +291,33 @@ class ClothPatch extends Deformable {
             const type = header.w;
             const inverseRotation = vec4(rotation.xyz.negate(), rotation.w);
             const local = rotateByQuaternion(inverseRotation, p.sub(header.xyz)).toVar();
-            const h = 1e-4;
-            const gradient = vec3(
-                localDistance(local.add(vec3(h, 0, 0)), type, params)
-                    .sub(localDistance(local.sub(vec3(h, 0, 0)), type, params)),
-                localDistance(local.add(vec3(0, h, 0)), type, params)
-                    .sub(localDistance(local.sub(vec3(0, h, 0)), type, params)),
-                localDistance(local.add(vec3(0, 0, h)), type, params)
-                    .sub(localDistance(local.sub(vec3(0, 0, h)), type, params))
-            );
-            const normal = rotateByQuaternion(rotation, safeNormalize(gradient));
-            const distance = localDistance(local, type, params);
+            const distance = float(0.0).toVar();
+            const localNormal = vec3(0, 0, 0).toVar();
+            If(type.greaterThan(2.5), () => {
+                const start = params.x.toInt();
+                distance.assign(-1e30);
+                Loop({ start, end: start.add(params.y.toInt()), type: 'int', condition: '<', name: 'plane' },
+                    ({ plane }) => {
+                        const facePlane = hullPlanes.element(plane);
+                        const d = facePlane.xyz.dot(local).sub(facePlane.w);
+                        If(d.greaterThan(distance), () => {
+                            distance.assign(d);
+                            localNormal.assign(facePlane.xyz);
+                        });
+                    });
+            }).Else(() => {
+                const h = 1e-4;
+                localNormal.assign(safeNormalize(vec3(
+                    localDistance(local.add(vec3(h, 0, 0)), type, params)
+                        .sub(localDistance(local.sub(vec3(h, 0, 0)), type, params)),
+                    localDistance(local.add(vec3(0, h, 0)), type, params)
+                        .sub(localDistance(local.sub(vec3(0, h, 0)), type, params)),
+                    localDistance(local.add(vec3(0, 0, h)), type, params)
+                        .sub(localDistance(local.sub(vec3(0, 0, h)), type, params))
+                )));
+                distance.assign(localDistance(local, type, params));
+            });
+            const normal = rotateByQuaternion(rotation, localNormal);
             const bodyVelocity = colliderData.element(base.add(3)).xyz;
             return { distance, normal, bodyVelocity, center: header.xyz };
         }
@@ -427,6 +454,64 @@ class ClothPatch extends Deformable {
                 });
             });
 
+            // Surface samples: particles alone let a sharp feature (a box corner or
+            // edge) slip between them and poke through a triangle. So also test the
+            // midpoint of each incident edge and the centre of each incident quad.
+            // A sample at Σ w_j·x_j with equal weights and masses is projected out
+            // by moving every contributing particle by the full penetration along
+            // the normal. Every particle sharing a sample computes it identically
+            // from readBuf and applies only its own share (race-free, as with the
+            // distance constraints); per collider, pushes are averaged over the
+            // penetrating samples so overlapping ones don't overshoot.
+            const W = gridWidthU;
+            const hasLeft = col.greaterThan(0);
+            const hasRight = col.lessThan(W.sub(1));
+            const hasUp = row.greaterThan(0);
+            const hasDown = row.lessThan(gridHeightU.sub(1));
+            const at = (valid, index) => readBuf.element(valid.select(index, i));
+            const self = readBuf.element(i).toVar();
+            const pLeft = at(hasLeft, i.sub(1)).toVar();
+            const pRight = at(hasRight, i.add(1)).toVar();
+            const pUp = at(hasUp, i.sub(W)).toVar();
+            const pDown = at(hasDown, i.add(W)).toVar();
+            const edgeMid = (p) => self.add(p).mul(0.5);
+            const quadMid = (valid, a, b, diagIndex) =>
+                self.add(a).add(b).add(at(valid, diagIndex)).mul(0.25);
+            const upLeft = hasUp.and(hasLeft);
+            const upRight = hasUp.and(hasRight);
+            const downLeft = hasDown.and(hasLeft);
+            const downRight = hasDown.and(hasRight);
+            const samples = [
+                [hasLeft, edgeMid(pLeft)],
+                [hasRight, edgeMid(pRight)],
+                [hasUp, edgeMid(pUp)],
+                [hasDown, edgeMid(pDown)],
+                [upLeft, quadMid(upLeft, pUp, pLeft, i.sub(W).sub(1))],
+                [upRight, quadMid(upRight, pUp, pRight, i.sub(W).add(1))],
+                [downLeft, quadMid(downLeft, pDown, pLeft, i.add(W).sub(1))],
+                [downRight, quadMid(downRight, pDown, pRight, i.add(W).add(1))],
+            ];
+            Loop({ start: int(0), end: colliderCountU, type: 'int', condition: '<' }, ({ i: k }) => {
+                const samplePush = vec3(0, 0, 0).toVar();
+                const sampleHits = float(0.0).toVar();
+                const center = vec3(0, 0, 0).toVar();
+                for (const [valid, sample] of samples) {
+                    const contact = colliderContact(sample, k);
+                    const penetration = thicknessU.sub(contact.distance).max(0.0)
+                        .mul(select(valid, float(1.0), float(0.0))).toVar();
+                    If(penetration.greaterThan(0.0), () => {
+                        samplePush.addAssign(contact.normal.mul(penetration));
+                        sampleHits.addAssign(1.0);
+                        center.assign(contact.center);
+                    });
+                }
+                const push = samplePush.div(sampleHits.max(1.0)).mul(movable).toVar();
+                newPos.addAssign(push);
+                If(sampleHits.greaterThan(0.0).and(feedbackU.greaterThan(0.0)), () => {
+                    addColliderImpulse(k, push.mul(selfMass).div(dtU).negate(), newPos, center);
+                });
+            });
+
             writeBuf.element(i).assign(newPos);
         })().compute(particleCount);
 
@@ -510,6 +595,7 @@ class ClothPatch extends Deformable {
         this.particleCount = particleCount;
         this.positionSettled = positionSettled;
         this.colliderData = colliderData;
+        this.hullPlanes = hullPlanes;
         this.impulseData = impulseData;
         this.feedbackScale = opts.feedbackScale;
         // Shapes currently in each collider slot, so a readback's slot k can
@@ -680,15 +766,32 @@ class ClothPatch extends Deformable {
     // anything past MAX_COLLIDERS is ignored. Call before step() each frame.
     setColliders(shapes) {
         const data = this.colliderData.value.array;
+        const planeData = this.hullPlanes.value.array;
         const slots = [];
         let count = 0;
+        let planeCount = 0;
         for (const shape of shapes) {
             if (count >= MAX_COLLIDERS) break;
             const type = SHAPE_TYPES[shape.type];
             if (type === undefined) continue;
-            const params = shape.type === 'box' ? shape.halfExtents
-                : shape.type === 'capsule' ? [shape.halfHeight, shape.radius, 0]
-                : [shape.radius, 0, 0];
+            let params;
+            if (shape.type === 'convexHull') {
+                const hullPlaneCount = shape.planes.length / 4;
+                if (planeCount + hullPlaneCount > MAX_HULL_PLANES) {
+                    if (!this.warnedHullPlanes) {
+                        console.warn(`Cloth: convex hulls exceed ${MAX_HULL_PLANES} planes, skipping some`);
+                        this.warnedHullPlanes = true;
+                    }
+                    continue;
+                }
+                planeData.set(shape.planes, planeCount * 4);
+                params = [planeCount, hullPlaneCount, 0];
+                planeCount += hullPlaneCount;
+            } else {
+                params = shape.type === 'box' ? shape.halfExtents
+                    : shape.type === 'capsule' ? [shape.halfHeight, shape.radius, 0]
+                    : [shape.radius, 0, 0];
+            }
             const velocity = shape.linearVelocity ?? [0, 0, 0];
             data.set([
                 ...shape.position, type,
@@ -704,6 +807,7 @@ class ClothPatch extends Deformable {
         this.colliderSlots = slots;
         this.uniforms.colliderCount.value = count;
         this.colliderData.value.needsUpdate = true;
+        if (planeCount > 0) this.hullPlanes.value.needsUpdate = true;
     }
 
     // Compliance = 1/stiffness; 0 is rigid, larger is softer (see ClothOptions).

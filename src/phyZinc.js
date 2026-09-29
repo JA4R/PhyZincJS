@@ -162,9 +162,43 @@ const PhyZinc = function() {
         return zincObject;
     }
 
+    // Face planes of a convex-hull collider, in its local frame, as a flat
+    // [nx, ny, nz, d, ...] array (n outward, n·p = d on the face). One plane per
+    // triangle, with coplanar triangles of the same face merged.
+    const computeHullPlanes = (collider) => {
+        const vertices = collider.vertices();
+        const indices = collider.indices();
+        if (!vertices || !indices) return undefined;
+        const vertex = (i) => new THREE.Vector3().fromArray(vertices, i * 3);
+        const centroid = new THREE.Vector3();
+        const vertexCount = vertices.length / 3;
+        for (let i = 0; i < vertexCount; i++) centroid.add(vertex(i));
+        centroid.divideScalar(vertexCount);
+        const planes = [];
+        const ab = new THREE.Vector3();
+        const ac = new THREE.Vector3();
+        for (let i = 0; i < indices.length; i += 3) {
+            const a = vertex(indices[i]);
+            ab.subVectors(vertex(indices[i + 1]), a);
+            ac.subVectors(vertex(indices[i + 2]), a);
+            const n = ab.clone().cross(ac);
+            if (n.lengthSq() < 1e-20) continue; // degenerate triangle
+            n.normalize();
+            let d = n.dot(a);
+            if (n.dot(centroid) > d) {
+                n.negate();
+                d = -d;
+            }
+            const duplicate = planes.some(p =>
+                p.n.dot(n) > 1 - 1e-4 && Math.abs(p.d - d) < 1e-5);
+            if (!duplicate) planes.push({ n, d });
+        }
+        return new Float32Array(planes.flatMap(({ n, d }) => [n.x, n.y, n.z, d]));
+    }
+
     // World-space analytic shapes of every collider a deformable can collide
-    // against: Rapier balls, cuboids and capsules, plus floor proxies. Convex
-    // hull/trimesh colliders (e.g. the gltf ragdoll parts) are not included.
+    // against: Rapier balls, cuboids, capsules and convex hulls, plus floor
+    // proxies. Trimesh colliders are not included.
     this.getColliderShapes = () => {
         const shapes = [];
         objects.forEach(zincObject => {
@@ -184,6 +218,13 @@ const PhyZinc = function() {
                 shape = { type: 'box', halfExtents: [h.x, h.y, h.z] };
             } else if (shapeType === ShapeType.Capsule) {
                 shape = { type: 'capsule', halfHeight: collider.halfHeight(), radius: collider.radius() };
+            } else if (shapeType === ShapeType.ConvexPolyhedron) {
+                // The hull never changes, so its planes are computed once.
+                if (zincObject.hullPlanes === undefined) {
+                    zincObject.hullPlanes = computeHullPlanes(collider) ?? null;
+                }
+                if (!zincObject.hullPlanes) return;
+                shape = { type: 'convexHull', planes: zincObject.hullPlanes };
             } else {
                 return;
             }
@@ -688,6 +729,7 @@ const PhyZinc = function() {
     this.dispose = () => {
         objects.forEach(object => {
             delete object.worldCollider;
+            delete object.hullPlanes;
         });
         objects.length = 0;
         joints.length = 0;
