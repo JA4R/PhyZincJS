@@ -42,3 +42,8 @@ export async function startWindClothScene(mount, gravity) {
 
   return phyZinc;
 }
+
+// Switches the wind on every cloth in a scene started by startWindClothScene.
+export function setWindEnabled(phyZinc, enabled) {
+  phyZinc.getDeformables().forEach(deformable => deformable.setWindEnabled?.(enabled));
+}

@@ -624,6 +624,10 @@ class ClothPatch extends Deformable {
         // three.js pads vec3 storage to vec4, so particle i is at [4i, 4i + 3).
         this.pickSnapshot = null;
         this.readbackPending = false;
+        // Last wind set with setWind(), kept so it can be switched off and back
+        // on without the caller remembering it.
+        this.wind = [0, 0, 0];
+        this.windEnabled = true;
     }
 
     // Seeds every particle buffer on the GPU. Must complete before the mesh is
@@ -755,9 +759,26 @@ class ClothPatch extends Deformable {
 
     // direction/strength as one vector ([x, y, z], world units per second²
     // along the surface normal); gust is 0 for steady wind, ~1 for strong gusts.
+    // While wind is disabled the value is stored and applied on re-enabling.
     setWind(wind, gust = 0) {
-        this.uniforms.wind.value.set(wind[0], wind[1], wind[2]);
+        this.wind = [wind[0], wind[1], wind[2]];
         this.uniforms.gust.value = gust;
+        this.applyWind();
+    }
+
+    // Switches the wind set with setWind() off or back on.
+    setWindEnabled(enabled) {
+        this.windEnabled = enabled;
+        this.applyWind();
+    }
+
+    isWindEnabled() {
+        return this.windEnabled;
+    }
+
+    applyWind() {
+        const [x, y, z] = this.windEnabled ? this.wind : [0, 0, 0];
+        this.uniforms.wind.value.set(x, y, z);
     }
 
     // shapes: [{ type: 'sphere' | 'box' | 'capsule', position: [x, y, z],

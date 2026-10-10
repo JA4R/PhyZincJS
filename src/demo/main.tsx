@@ -6,12 +6,15 @@ import theme from './theme.tsx';
 import Scene, { SceneHandle } from './Scene.tsx';
 import ControlPanel from './ControlPanel.tsx';
 import FrameRateDisplay from './FrameRateDisplay.tsx';
-import { DEMOS } from './demos/index.js';
+import { DEMOS, Demo } from './demos/index.js';
 
 const DEFAULT_GRAVITY = 9.81;
 const GRAVITY_SCALE = 0.1;
 
 const DEFAULT_DEMO = 'cloth-collision';
+
+const defaultToggleValues = (demo: Demo) =>
+  Object.fromEntries((demo.toggles ?? []).map((t) => [t.key, t.defaultChecked]));
 
 const App = () => {
   const sceneRef = React.useRef<SceneHandle>(null);
@@ -22,6 +25,9 @@ const App = () => {
   const [showFrameRate, setShowFrameRate] = React.useState(false);
   // null until the counter has measured its first window.
   const [frameRate, setFrameRate] = React.useState<number | null>(null);
+  // Current values of the selected demo's own toggles (e.g. wind), by key.
+  // Kept across Restart; reset to the defaults when switching demo.
+  const [toggleValues, setToggleValues] = React.useState(() => defaultToggleValues(demo));
 
   const handleShowFrameRateChange = (checked: boolean) => {
     setShowFrameRate(checked);
@@ -44,6 +50,7 @@ const App = () => {
   // scene and mounts the new one. Every demo starts paused.
   const handleDemoChange = (value: string) => {
     setDemoKey(value);
+    setToggleValues(defaultToggleValues(DEMOS.find((d) => d.key === value) ?? DEMOS[0]));
     setPaused(true);
     setFrameRate(null);
   };
@@ -77,6 +84,13 @@ const App = () => {
           },
         ]}
         toggles={[
+          ...(demo.toggles ?? []).map((toggle) => ({
+            key: toggle.key,
+            label: toggle.label,
+            checked: toggleValues[toggle.key] ?? toggle.defaultChecked,
+            onChange: (checked: boolean) =>
+              setToggleValues((prev) => ({ ...prev, [toggle.key]: checked })),
+          })),
           {
             key: 'frameRate',
             label: 'Show frame rate',
@@ -101,6 +115,8 @@ const App = () => {
         gravity={-gravityRef.current * GRAVITY_SCALE}
         showFrameRate={showFrameRate}
         onFrameRate={setFrameRate}
+        toggles={demo.toggles}
+        toggleValues={toggleValues}
       />
       {showFrameRate && <FrameRateDisplay framesPerSecond={frameRate} />}
     </ThemeProvider>

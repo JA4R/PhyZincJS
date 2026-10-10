@@ -1,5 +1,6 @@
 import { useImperativeHandle, forwardRef, useRef, useEffect } from 'react';
 import Box from '@mui/material/Box';
+import type { DemoToggle } from './demos/index.js';
 
 type Props = {
   // A demo's start function (see demos/index.js); resolves to its PhyZinc.
@@ -9,6 +10,10 @@ type Props = {
   // onFrameRate (about twice a second).
   showFrameRate?: boolean;
   onFrameRate?: (framesPerSecond: number) => void;
+  // The demo's own switches and their current values (by toggle key), applied
+  // to each new instance and again whenever the values change.
+  toggles?: DemoToggle[];
+  toggleValues?: Record<string, boolean>;
 };
 
 export type SceneHandle = {
@@ -22,7 +27,7 @@ const disposeInstance = (phyZinc: any) => {
   domElement?.parentNode?.removeChild(domElement);
 };
 
-const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = false, onFrameRate }, ref) => {
+const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = false, onFrameRate, toggles = [], toggleValues = {} }, ref) => {
   const mountRef = useRef<HTMLDivElement>(null);
   // A ref, not state: the effect cleanup below runs with the closure from the
   // first render, so it must read the current instance through a ref.
@@ -35,6 +40,15 @@ const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = 
   showFrameRateRef.current = showFrameRate;
   const onFrameRateRef = useRef(onFrameRate);
   onFrameRateRef.current = onFrameRate;
+  const togglesRef = useRef(toggles);
+  togglesRef.current = toggles;
+  const toggleValuesRef = useRef(toggleValues);
+  toggleValuesRef.current = toggleValues;
+
+  const applyToggles = (phyZinc: any) => {
+    togglesRef.current.forEach((toggle) =>
+      toggle.apply(phyZinc, toggleValuesRef.current[toggle.key] ?? toggle.defaultChecked));
+  };
 
   const dispose = () => {
     if (phyZincRef.current) {
@@ -54,12 +68,18 @@ const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = 
     // Each restart creates a new PhyZinc, so the counter is set up again here.
     phyZinc.addFrameRateCallback((rate: number) => onFrameRateRef.current?.(rate));
     phyZinc.setFrameRateCounterEnabled(showFrameRateRef.current);
+    applyToggles(phyZinc);
   };
 
   // Toggling the counter on the current instance without restarting it.
   useEffect(() => {
     phyZincRef.current?.setFrameRateCounterEnabled(showFrameRate);
   }, [showFrameRate]);
+
+  // Same for the demo's toggles: applied to the running instance, no restart.
+  useEffect(() => {
+    if (phyZincRef.current) applyToggles(phyZincRef.current);
+  }, [toggleValues]);
 
   useImperativeHandle(ref, () => ({
     restart: (newGravity?: number) => {

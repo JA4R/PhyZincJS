@@ -162,6 +162,9 @@ const PhyZinc = function() {
         return zincObject;
     }
 
+    // Every deformable added with addDeformable(), in the order added.
+    this.getDeformables = () => [...deformables];
+
     // Face planes of a convex-hull collider, in its local frame, as a flat
     // [nx, ny, nz, d, ...] array (n outward, n·p = d on the face). One plane per
     // triangle, with coplanar triangles of the same face merged.
