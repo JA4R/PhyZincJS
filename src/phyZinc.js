@@ -49,6 +49,11 @@ const PhyZinc = function() {
     let paused = false;
     let dragState = null;
     let dragListenersAttached = false;
+    const keyDownCallbacks = [];
+    // Last mouse position over the canvas, in document (client) coordinates;
+    // null until the mouse first moves over it. Used by shootSphere().
+    let lastPointer = null;
+    let keyDownListener = null;
 
     this.setGravity = g => {
         gravity = g;
@@ -273,6 +278,47 @@ const PhyZinc = function() {
         } else {
             console.error("Physics engine is not ready yet.");
         }
+    }
+
+    // Launches a sphere from the camera's eye position toward the point under
+    // the mouse at `speed` (world units per second); toward the camera target
+    // if the mouse hasn't been over the canvas yet. Returns its zincObject.
+    this.shootSphere = (radius, speed, density = 1.0) => {
+        const zincCameraControl = this.renderer?.getCurrentScene()?.getZincCameraControls();
+        const camera = zincCameraControl?.cameraObject;
+        if (!camera) return undefined;
+        const direction = new THREE.Vector3();
+        if (lastPointer) {
+            const mouse = zincCameraControl.getNDCFromDocumentCoords(lastPointer.x, lastPointer.y);
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(mouse, camera);
+            direction.copy(raycaster.ray.direction);
+        } else if (camera.target) {
+            direction.subVectors(camera.target, camera.position);
+        }
+        if (direction.lengthSq() === 0) return undefined;
+        direction.normalize();
+        const eye = camera.position;
+        const zincObject = this.addSphere([eye.x, eye.y, eye.z], radius, 16, 16, density);
+        zincObject?.rigidBody?.setLinvel({
+            x: direction.x * speed, y: direction.y * speed, z: direction.z * speed,
+        }, true);
+        return zincObject;
+    }
+
+    // Removes an object added with addSphere/addBox/addPhysicsToObject from both
+    // the physics world and the scene.
+    this.removeObject = (zincObject) => {
+        const index = objects.indexOf(zincObject);
+        if (index !== -1) objects.splice(index, 1);
+        if (zincObject.rigidBody) {
+            if (dragState?.rigidBody === zincObject.rigidBody) dragState = null;
+            // Also removes the colliders attached to the body.
+            this.physicsWorld?.removeRigidBody(zincObject.rigidBody);
+            delete zincObject.rigidBody;
+            delete zincObject.worldCollider;
+        }
+        this.renderer?.getCurrentScene()?.removeZincObject(zincObject);
     }
 
     // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
@@ -728,6 +774,22 @@ const PhyZinc = function() {
         }
     }
 
+    // Calls callback(event) for every keydown on the window, except while
+    // typing in a text field or with a button focused (where Space/Enter
+    // already mean something). The listener is removed by dispose().
+    this.addKeyDownCallback = (callback) => {
+        keyDownCallbacks.push(callback);
+        if (keyDownListener) return;
+        keyDownListener = (event) => {
+            if (event.target instanceof Element &&
+                event.target.closest('input, textarea, select, button, [contenteditable="true"], [role="button"], [role="combobox"]')) {
+                return;
+            }
+            keyDownCallbacks.forEach(cb => cb(event));
+        };
+        window.addEventListener('keydown', keyDownListener);
+    }
+
     this.pause = (flag) => {
         paused = flag;
     }
@@ -772,6 +834,10 @@ const PhyZinc = function() {
         this.renderer = renderer;
         await this.renderer.initialiseVisualisation();
         this.renderer.playAnimation = false;
+        // No cleanup needed: the canvas, and so the listener, is discarded on dispose.
+        this.renderer.getThreeJSRenderer().domElement.addEventListener('mousemove', (event) => {
+            lastPointer = { x: event.clientX, y: event.clientY };
+        });
     }
 
     this.isReady = () => {
@@ -785,6 +851,11 @@ const PhyZinc = function() {
         });
         objects.length = 0;
         joints.length = 0;
+        if (keyDownListener) {
+            window.removeEventListener('keydown', keyDownListener);
+            keyDownListener = null;
+        }
+        keyDownCallbacks.length = 0;
         deformables.forEach(deformable => deformable.dispose());
         frameRateState.enabled = false;
         frameRateCallbacks.length = 0;
