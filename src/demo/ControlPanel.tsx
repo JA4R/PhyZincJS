@@ -8,6 +8,8 @@ import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import TextField from '@mui/material/TextField';
 import MenuItem from '@mui/material/MenuItem';
+import Switch from '@mui/material/Switch';
+import FormControlLabel from '@mui/material/FormControlLabel';
 
 export type ControlAction = {
   key: string;
@@ -32,16 +34,24 @@ export type ControlSelect = {
   onChange: (value: string) => void;
 };
 
+export type ControlToggle = {
+  key: string;
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+};
+
 type Props = {
   title?: string;
   actions: ControlAction[];
   fields?: ControlField[];
   selects?: ControlSelect[];
+  toggles?: ControlToggle[];
 };
 
 // Actions/fields are plain config arrays rather than hardcoded markup, so adding
 // another button or numeric input later is a one-line addition at the call site.
-const ControlPanel = ({ title = 'Controls', actions, fields = [], selects = [] }: Props) => {
+const ControlPanel = ({ title = 'Controls', actions, fields = [], selects = [], toggles = [] }: Props) => {
   const [open, setOpen] = useState(true);
 
   return (
@@ -108,6 +118,19 @@ const ControlPanel = ({ title = 'Controls', actions, fields = [], selects = [] }
                 ))}
               </Stack>
             )}
+            {toggles.map((toggle) => (
+              <FormControlLabel
+                key={toggle.key}
+                label={toggle.label}
+                control={
+                  <Switch
+                    size="small"
+                    checked={toggle.checked}
+                    onChange={(e) => toggle.onChange(e.target.checked)}
+                  />
+                }
+              />
+            ))}
             <Stack direction="row" spacing={1} flexWrap="wrap">
               {actions.map((action) => (
                 <Button

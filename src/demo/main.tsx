@@ -5,6 +5,7 @@ import CssBaseline from '@mui/material/CssBaseline';
 import theme from './theme.tsx';
 import Scene, { SceneHandle } from './Scene.tsx';
 import ControlPanel from './ControlPanel.tsx';
+import FrameRateDisplay from './FrameRateDisplay.tsx';
 import { DEMOS } from './demos/index.js';
 
 const DEFAULT_GRAVITY = 9.81;
@@ -18,6 +19,14 @@ const App = () => {
   const demo = DEMOS.find((d) => d.key === demoKey) ?? DEMOS[0];
   const [paused, setPaused] = React.useState(true);
   const gravityRef = React.useRef(DEFAULT_GRAVITY);
+  const [showFrameRate, setShowFrameRate] = React.useState(false);
+  // null until the counter has measured its first window.
+  const [frameRate, setFrameRate] = React.useState<number | null>(null);
+
+  const handleShowFrameRateChange = (checked: boolean) => {
+    setShowFrameRate(checked);
+    setFrameRate(null);
+  };
 
   const handleGravityChange = (value: string) => {
     const parsed = Number(value);
@@ -36,6 +45,7 @@ const App = () => {
   const handleDemoChange = (value: string) => {
     setDemoKey(value);
     setPaused(true);
+    setFrameRate(null);
   };
 
   const handlePauseToggle = () => {
@@ -66,6 +76,14 @@ const App = () => {
             onChange: handleGravityChange,
           },
         ]}
+        toggles={[
+          {
+            key: 'frameRate',
+            label: 'Show frame rate',
+            checked: showFrameRate,
+            onChange: handleShowFrameRateChange,
+          },
+        ]}
         actions={[
           { key: 'restart', label: 'Restart', onClick: handleRestart },
           {
@@ -81,7 +99,10 @@ const App = () => {
         ref={sceneRef}
         start={demo.start}
         gravity={-gravityRef.current * GRAVITY_SCALE}
+        showFrameRate={showFrameRate}
+        onFrameRate={setFrameRate}
       />
+      {showFrameRate && <FrameRateDisplay framesPerSecond={frameRate} />}
     </ThemeProvider>
   );
 };

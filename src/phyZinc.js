@@ -635,6 +635,55 @@ const PhyZinc = function() {
     // Starts the render loop and per-frame physics stepping. Called
     // automatically once a gltf/metadata download completes; call it directly
     // for scenes built only from primitives and deformables.
+    // Frame rate counter: counts rendered frames and reports the average rate
+    // over each FRAME_RATE_WINDOW_MS window. Its pre-render callback is only
+    // registered the first time it's enabled, and does nothing while disabled.
+    const FRAME_RATE_WINDOW_MS = 500;
+    const frameRateCallbacks = [];
+    const frameRateState = {
+        enabled: false, registered: false, frames: 0, windowStart: 0, rate: 0,
+    };
+
+    const countFrame = () => {
+        if (!frameRateState.enabled) return;
+        const now = performance.now();
+        frameRateState.frames++;
+        const elapsed = now - frameRateState.windowStart;
+        if (elapsed >= FRAME_RATE_WINDOW_MS) {
+            frameRateState.rate = frameRateState.frames * 1000 / elapsed;
+            frameRateState.frames = 0;
+            frameRateState.windowStart = now;
+            frameRateCallbacks.forEach(callback => callback(frameRateState.rate));
+        }
+    }
+
+    this.setFrameRateCounterEnabled = (enabled) => {
+        if (enabled && !frameRateState.registered && this.renderer) {
+            this.renderer.addPreRenderCallbackFunction(countFrame);
+            frameRateState.registered = true;
+        }
+        if (enabled && !frameRateState.enabled) {
+            // Start a fresh window so time spent disabled isn't averaged in.
+            frameRateState.frames = 0;
+            frameRateState.windowStart = performance.now();
+        }
+        frameRateState.enabled = enabled;
+        if (!enabled) frameRateState.rate = 0;
+    }
+
+    this.isFrameRateCounterEnabled = () => frameRateState.enabled;
+
+    // Frames per second over the last window; 0 while disabled or before the
+    // first window completes.
+    this.getFrameRate = () => frameRateState.rate;
+
+    // callback(framesPerSecond), called after each window while enabled.
+    this.addFrameRateCallback = (callback) => {
+        if (callback && (typeof callback === "function")) {
+            frameRateCallbacks.push(callback);
+        }
+    }
+
     this.startSimulation = () => {
         if (!this.renderer || simulationStarted) return;
         simulationStarted = true;
@@ -734,6 +783,8 @@ const PhyZinc = function() {
         objects.length = 0;
         joints.length = 0;
         deformables.forEach(deformable => deformable.dispose());
+        frameRateState.enabled = false;
+        frameRateCallbacks.length = 0;
         deformables.length = 0;
         lights.forEach(({ light, scene }) => {
             scene.removeObject(light.target);
