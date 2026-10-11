@@ -3,8 +3,8 @@ import { startWindClothScene, setWindEnabled } from "./windCloth.js"
 import { startClothCollisionScene } from "./clothCollision.js"
 import { startClothTrampolineScene } from "./clothTrampoline.js"
 
-// Every demo's start(mount, gravity) builds its scene paused and resolves to
-// its PhyZinc instance. Adding a demo is one module plus one entry here.
+// Every demo's start(mount, gravity, events) builds its scene paused and
+// resolves to its PhyZinc instance; events.dismissHint() fades out its `hint`. Adding a demo is one module plus one entry here.
 // Optional `toggles` add demo-specific switches to the control panel; each
 // one's apply(phyZinc, checked) runs once the scene starts and on every change.
 export const DEMOS = [
@@ -13,6 +13,7 @@ export const DEMOS = [
     key: 'wind-cloth',
     label: 'Wind cloth',
     start: startWindClothScene,
+    hint: 'Press Space to shoot a ball at the mouse pointer',
     toggles: [
       { key: 'wind', label: 'Wind', defaultChecked: true, apply: setWindEnabled },
     ],

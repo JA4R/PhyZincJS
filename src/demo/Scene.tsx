@@ -1,10 +1,10 @@
 import { useImperativeHandle, forwardRef, useRef, useEffect } from 'react';
 import Box from '@mui/material/Box';
-import type { DemoToggle } from './demos/index.js';
+import type { DemoToggle, DemoEvents } from './demos/index.js';
 
 type Props = {
   // A demo's start function (see demos/index.js); resolves to its PhyZinc.
-  start: (mount: HTMLElement, gravity: number) => Promise<any>;
+  start: (mount: HTMLElement, gravity: number, events: DemoEvents) => Promise<any>;
   gravity: number;
   // Whether the PhyZinc frame rate counter runs; rates are reported through
   // onFrameRate (about twice a second).
@@ -14,6 +14,8 @@ type Props = {
   // to each new instance and again whenever the values change.
   toggles?: DemoToggle[];
   toggleValues?: Record<string, boolean>;
+  // Called when the demo dismisses its hint (see DemoEvents).
+  onDismissHint?: () => void;
 };
 
 export type SceneHandle = {
@@ -27,7 +29,7 @@ const disposeInstance = (phyZinc: any) => {
   domElement?.parentNode?.removeChild(domElement);
 };
 
-const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = false, onFrameRate, toggles = [], toggleValues = {} }, ref) => {
+const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = false, onFrameRate, toggles = [], toggleValues = {}, onDismissHint }, ref) => {
   const mountRef = useRef<HTMLDivElement>(null);
   // A ref, not state: the effect cleanup below runs with the closure from the
   // first render, so it must read the current instance through a ref.
@@ -44,6 +46,10 @@ const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = 
   togglesRef.current = toggles;
   const toggleValuesRef = useRef(toggleValues);
   toggleValuesRef.current = toggleValues;
+  const onDismissHintRef = useRef(onDismissHint);
+  onDismissHintRef.current = onDismissHint;
+  // Read through the ref, so the demo always reaches the latest callback.
+  const events: DemoEvents = { dismissHint: () => onDismissHintRef.current?.() };
 
   const applyToggles = (phyZinc: any) => {
     togglesRef.current.forEach((toggle) =>
@@ -59,7 +65,7 @@ const Scene = forwardRef<SceneHandle, Props>(({ start, gravity, showFrameRate = 
 
   const initialise = async (sceneGravity: number) => {
     const generation = ++generationRef.current;
-    const phyZinc = await start(mountRef.current!, sceneGravity);
+    const phyZinc = await start(mountRef.current!, sceneGravity, events);
     if (generation !== generationRef.current) {
       disposeInstance(phyZinc);
       return;

@@ -13,7 +13,7 @@ const MAX_BALLS = 20;
 
 // WebGPU XPBD cloth curtain pinned at its top corners, blown by gusty wind.
 // Press Space to shoot a ball from the camera toward the mouse pointer.
-export async function startWindClothScene(mount, gravity) {
+export async function startWindClothScene(mount, gravity, events) {
   const phyZinc = new PhyZinc();
   // Rapier is only needed for the shot balls.
   await phyZinc.initialise();
@@ -62,6 +62,7 @@ export async function startWindClothScene(mount, gravity) {
     if (!ball) return;
     balls.push(ball);
     if (balls.length > MAX_BALLS) phyZinc.removeObject(balls.shift());
+    events?.dismissHint();
   });
 
   return phyZinc;

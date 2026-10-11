@@ -6,6 +6,7 @@ import theme from './theme.tsx';
 import Scene, { SceneHandle } from './Scene.tsx';
 import ControlPanel from './ControlPanel.tsx';
 import FrameRateDisplay from './FrameRateDisplay.tsx';
+import HintMessage from './HintMessage.tsx';
 import { DEMOS, Demo } from './demos/index.js';
 
 const DEFAULT_GRAVITY = 9.81;
@@ -28,6 +29,9 @@ const App = () => {
   // Current values of the selected demo's own toggles (e.g. wind), by key.
   // Kept across Restart; reset to the defaults when switching demo.
   const [toggleValues, setToggleValues] = React.useState(() => defaultToggleValues(demo));
+  // Whether the demo's hint has been dismissed. Kept across Restart (the user
+  // has already learnt the control); reset when switching demo.
+  const [hintDismissed, setHintDismissed] = React.useState(false);
 
   const handleShowFrameRateChange = (checked: boolean) => {
     setShowFrameRate(checked);
@@ -50,6 +54,7 @@ const App = () => {
   // scene and mounts the new one. Every demo starts paused.
   const handleDemoChange = (value: string) => {
     setDemoKey(value);
+    setHintDismissed(false);
     setToggleValues(defaultToggleValues(DEMOS.find((d) => d.key === value) ?? DEMOS[0]));
     setPaused(true);
     setFrameRate(null);
@@ -117,8 +122,10 @@ const App = () => {
         onFrameRate={setFrameRate}
         toggles={demo.toggles}
         toggleValues={toggleValues}
+        onDismissHint={() => setHintDismissed(true)}
       />
       {showFrameRate && <FrameRateDisplay framesPerSecond={frameRate} />}
+      {demo.hint && <HintMessage text={demo.hint} visible={!hintDismissed} />}
     </ThemeProvider>
   );
 };
