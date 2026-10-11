@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc && vite build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "serve": "vite --port 7000 --host",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -39,6 +41,7 @@
     "eslint-plugin-react-refresh": "^0.4.5",
     "file-loader": "^6.2.0",
     "jsdoc": "^4.0.2",
+    "prettier": "3.9.6",
     "raw-loader": "^4.0.2",
     "typescript": "^5.2.2",
     "vite": "^8.3.0",

@@ -8,72 +8,72 @@
 // to no-ops, so a deformable that doesn't collide or can't be dragged simply
 // leaves them alone.
 class Deformable {
-    constructor() {
-        // THREE.Mesh added to the scene by PhyZinc.addDeformable().
-        this.mesh = null;
-        this.pickingEnabled = true;
-        this.collisionFeedbackEnabled = false;
-    }
+  constructor() {
+    // THREE.Mesh added to the scene by PhyZinc.addDeformable().
+    this.mesh = null;
+    this.pickingEnabled = true;
+    this.collisionFeedbackEnabled = false;
+  }
 
-    // Whether this deformable pushes back on the rigid bodies it touches
-    // (two-way coupling). Off by default, since it costs a GPU readback per
-    // step; subclasses override to start/stop that work, calling super first.
-    setCollisionFeedback(enabled) {
-        this.collisionFeedbackEnabled = enabled;
-    }
+  // Whether this deformable pushes back on the rigid bodies it touches
+  // (two-way coupling). Off by default, since it costs a GPU readback per
+  // step; subclasses override to start/stop that work, calling super first.
+  setCollisionFeedback(enabled) {
+    this.collisionFeedbackEnabled = enabled;
+  }
 
-    isCollisionFeedbackEnabled() {
-        return this.collisionFeedbackEnabled;
-    }
+  isCollisionFeedbackEnabled() {
+    return this.collisionFeedbackEnabled;
+  }
 
-    // Impulses this deformable has applied to rigid colliders since the last
-    // call, as [{ rigidBody, impulse: [x, y, z], torque: [x, y, z] }] (N·s and
-    // N·m·s, world space; torque about the body's centre). PhyZinc applies them
-    // before each Rapier step.
-    takeColliderImpulses() {
-        return [];
-    }
+  // Impulses this deformable has applied to rigid colliders since the last
+  // call, as [{ rigidBody, impulse: [x, y, z], torque: [x, y, z] }] (N·s and
+  // N·m·s, world space; torque about the body's centre). PhyZinc applies them
+  // before each Rapier step.
+  takeColliderImpulses() {
+    return [];
+  }
 
-    // Whether PhyZinc should offer this deformable to mouse picking/dragging.
-    // Subclasses that pay for picking (e.g. a GPU readback) override this to
-    // start or stop that work, calling super.setPickingEnabled() first.
-    setPickingEnabled(enabled) {
-        this.pickingEnabled = enabled;
-    }
+  // Whether PhyZinc should offer this deformable to mouse picking/dragging.
+  // Subclasses that pay for picking (e.g. a GPU readback) override this to
+  // start or stop that work, calling super.setPickingEnabled() first.
+  setPickingEnabled(enabled) {
+    this.pickingEnabled = enabled;
+  }
 
-    isPickingEnabled() {
-        return this.pickingEnabled;
-    }
+  isPickingEnabled() {
+    return this.pickingEnabled;
+  }
 
-    // Advances the simulation by one fixed time step.
-    step() {
-        throw new Error(`${this.constructor.name} must implement step()`);
-    }
+  // Advances the simulation by one fixed time step.
+  step() {
+    throw new Error(`${this.constructor.name} must implement step()`);
+  }
 
-    // shapes: world-space analytic colliders, as returned by
-    // PhyZinc.getColliderShapes(). Called before each step().
-    // eslint-disable-next-line no-unused-vars
-    setColliders(shapes) {}
+  // shapes: world-space analytic colliders, as returned by
+  // PhyZinc.getColliderShapes(). Called before each step().
+  // eslint-disable-next-line no-unused-vars
+  setColliders(shapes) {}
 
-    // ray: world-space THREE.Ray under the mouse. Returns a hit
-    // { point: THREE.Vector3, distance (along the ray), ... } or null; PhyZinc
-    // passes the same hit back to grab() if this is the nearest object.
-    // eslint-disable-next-line no-unused-vars
-    pick(ray) {
-        return null;
-    }
+  // ray: world-space THREE.Ray under the mouse. Returns a hit
+  // { point: THREE.Vector3, distance (along the ray), ... } or null; PhyZinc
+  // passes the same hit back to grab() if this is the nearest object.
+  // eslint-disable-next-line no-unused-vars
+  pick(ray) {
+    return null;
+  }
 
-    // eslint-disable-next-line no-unused-vars
-    grab(hit) {}
+  // eslint-disable-next-line no-unused-vars
+  grab(hit) {}
 
-    // point: world-space THREE.Vector3 the grabbed part should follow.
-    // eslint-disable-next-line no-unused-vars
-    moveGrab(point) {}
+  // point: world-space THREE.Vector3 the grabbed part should follow.
+  // eslint-disable-next-line no-unused-vars
+  moveGrab(point) {}
 
-    release() {}
+  release() {}
 
-    // Frees GPU/CPU resources. Called by PhyZinc.dispose().
-    dispose() {}
+  // Frees GPU/CPU resources. Called by PhyZinc.dispose().
+  dispose() {}
 }
 
 export { Deformable };

@@ -1,6 +1,6 @@
-import Zinc from "zincjs";
-import { PhyZinc } from "../../phyZinc.js"
-import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
+import Zinc from 'zincjs';
+import { PhyZinc } from '../../phyZinc.js';
+import { ClothPatch, ClothOptions } from '../../physics/pbdCloth.js';
 
 // Balls shot with Space: launched from the camera eye toward the mouse.
 const BALL_RADIUS = 0.1;
@@ -19,9 +19,9 @@ export async function startWindClothScene(mount, gravity, events) {
   await phyZinc.initialise();
   phyZinc.pause(true);
   const renderer = new Zinc.Renderer(mount, window);
-  Zinc.defaultMaterialColor = 0xFFFF9C;
+  Zinc.defaultMaterialColor = 0xffff9c;
   await phyZinc.attach(renderer);
-  const scene = phyZinc.startNewScene("cloth");
+  const scene = phyZinc.startNewScene('cloth');
   phyZinc.setGravity(gravity);
   const clothOptions = ClothOptions(20, 20, 0.1, [0, 0, 0]);
   clothOptions.gravity = [0, 0, gravity];
@@ -31,11 +31,11 @@ export async function startWindClothScene(mount, gravity, events) {
   // from the camera, which sits on -Y.
   // Wind was tuned against full gravity (9.81), so scale it with gravity to
   // keep the same look at whatever gravity the UI passes in.
-  cloth.setWind([0, 6 * Math.abs(gravity) / 9.81, 0], 0.8);
+  cloth.setWind([0, (6 * Math.abs(gravity)) / 9.81, 0], 0.8);
   // Two-way coupling, so the cloth slows the balls rather than letting them
   // pass straight through.
   cloth.setCollisionFeedback(true);
-  phyZinc.addDeformable(cloth, "cloth");
+  phyZinc.addDeformable(cloth, 'cloth');
   phyZinc.startSimulation();
 
   // The patch is Y-thin (a hanging curtain in the XZ plane), so point the
@@ -43,9 +43,9 @@ export async function startWindClothScene(mount, gravity, events) {
   // angle, which isn't guaranteed to face a flat patch head-on.
   const { gridWidth, gridHeight, spacing, origin } = clothOptions;
   const center = [
-    origin[0] + (gridWidth - 1) * spacing / 2,
+    origin[0] + ((gridWidth - 1) * spacing) / 2,
     origin[1],
-    origin[2] - (gridHeight - 1) * spacing / 2,
+    origin[2] - ((gridHeight - 1) * spacing) / 2,
   ];
   const distance = Math.max(gridWidth, gridHeight) * spacing * 1.5;
   scene.getZincCameraControls().setCurrentCameraSettings({
@@ -70,5 +70,5 @@ export async function startWindClothScene(mount, gravity, events) {
 
 // Switches the wind on every cloth in a scene started by startWindClothScene.
 export function setWindEnabled(phyZinc, enabled) {
-  phyZinc.getDeformables().forEach(deformable => deformable.setWindEnabled?.(enabled));
+  phyZinc.getDeformables().forEach((deformable) => deformable.setWindEnabled?.(enabled));
 }

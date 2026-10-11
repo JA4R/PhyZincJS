@@ -1,6 +1,6 @@
-import Zinc from "zincjs";
-import { PhyZinc } from "../../phyZinc.js"
-import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
+import Zinc from 'zincjs';
+import { PhyZinc } from '../../phyZinc.js';
+import { ClothPatch, ClothOptions } from '../../physics/pbdCloth.js';
 
 // A cloth dropped over resting rigid bodies, with a ball falling onto it.
 // Coupling is two-way: the cloth also pushes back on the bodies it touches.
@@ -11,9 +11,9 @@ export async function startClothCollisionScene(mount, gravity) {
   await phyZinc.initialise();
   phyZinc.pause(true);
   const renderer = new Zinc.Renderer(mount, window);
-  Zinc.defaultMaterialColor = 0xFFFF9C;
+  Zinc.defaultMaterialColor = 0xffff9c;
   await phyZinc.attach(renderer);
-  const scene = phyZinc.startNewScene("cloth-collision");
+  const scene = phyZinc.startNewScene('cloth-collision');
   phyZinc.setGravity(gravity);
 
   const floorZ = -1.0;
@@ -42,7 +42,7 @@ export async function startClothCollisionScene(mount, gravity) {
   // falls and drapes over them.
   const gridSize = 24;
   const spacing = 0.075;
-  const halfSpan = (gridSize - 1) * spacing / 2;
+  const halfSpan = ((gridSize - 1) * spacing) / 2;
   const clothOptions = ClothOptions(gridSize, gridSize, spacing, [-halfSpan, halfSpan, 0]);
   clothOptions.pin = 'none';
   clothOptions.rowDirection = [0, -1, 0];
@@ -51,7 +51,7 @@ export async function startClothCollisionScene(mount, gravity) {
   await cloth.initialise();
   // Two-way coupling: the cloth's weight and friction push back on the bodies.
   cloth.setCollisionFeedback(true);
-  phyZinc.addDeformable(cloth, "cloth");
+  phyZinc.addDeformable(cloth, 'cloth');
   phyZinc.startSimulation();
 
   scene.getZincCameraControls().setCurrentCameraSettings({

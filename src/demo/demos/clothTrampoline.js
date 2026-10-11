@@ -1,8 +1,7 @@
-import Zinc from "zincjs";
-import { PhyZinc } from "../../phyZinc.js"
-import { ClothPatch, ClothOptions } from "../../physics/pbdCloth.js"
-import { loadDummyBody } from "./sceneHelpers.js"
-
+import Zinc from 'zincjs';
+import { PhyZinc } from '../../phyZinc.js';
+import { ClothPatch, ClothOptions } from '../../physics/pbdCloth.js';
+import { loadDummyBody } from './sceneHelpers.js';
 
 // A cloth pinned at its four corners like a trampoline, with bodies dropped
 // onto it. Collision feedback (two-way coupling) is what lets the cloth catch
@@ -12,9 +11,9 @@ export async function startClothTrampolineScene(mount, gravity) {
   await phyZinc.initialise();
   phyZinc.pause(true);
   const renderer = new Zinc.Renderer(mount, window);
-  Zinc.defaultMaterialColor = 0xFFFF9C;
+  Zinc.defaultMaterialColor = 0xffff9c;
   await phyZinc.attach(renderer);
-  const scene = phyZinc.startNewScene("cloth-trampoline");
+  const scene = phyZinc.startNewScene('cloth-trampoline');
   phyZinc.setGravity(gravity);
 
   const floorZ = -2.0;
@@ -42,7 +41,7 @@ export async function startClothTrampolineScene(mount, gravity) {
   // Horizontal patch in the XY plane, pinned at its corners, above the floor.
   const gridSize = 24;
   const spacing = 0.1;
-  const halfSpan = (gridSize - 1) * spacing / 2;
+  const halfSpan = ((gridSize - 1) * spacing) / 2;
   const clothOptions = ClothOptions(gridSize, gridSize, spacing, [-halfSpan, halfSpan, 0.03]);
   clothOptions.pin = 'corners';
   clothOptions.rowDirection = [0, -1, 0];
@@ -51,7 +50,7 @@ export async function startClothTrampolineScene(mount, gravity) {
   const cloth = new ClothPatch(renderer, clothOptions);
   await cloth.initialise();
   cloth.setCollisionFeedback(true);
-  phyZinc.addDeformable(cloth, "cloth");
+  phyZinc.addDeformable(cloth, 'cloth');
 
   phyZinc.startSimulation();
 
@@ -60,7 +59,6 @@ export async function startClothTrampolineScene(mount, gravity) {
     targetPosition: [0, 0, -0.1],
     upVector: [0, 0, 1],
   });
-  
 
   return phyZinc;
 }

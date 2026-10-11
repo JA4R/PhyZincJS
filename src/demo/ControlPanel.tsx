@@ -51,7 +51,13 @@ type Props = {
 
 // Actions/fields are plain config arrays rather than hardcoded markup, so adding
 // another button or numeric input later is a one-line addition at the call site.
-const ControlPanel = ({ title = 'Controls', actions, fields = [], selects = [], toggles = [] }: Props) => {
+const ControlPanel = ({
+  title = 'Controls',
+  actions,
+  fields = [],
+  selects = [],
+  toggles = [],
+}: Props) => {
   const [open, setOpen] = useState(true);
 
   return (

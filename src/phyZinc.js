@@ -1,876 +1,915 @@
 import { getRapier } from './physics/rapier';
-import Zinc from "zincjs";
+import Zinc from 'zincjs';
 import { Deformable } from './physics/deformable.js';
 const THREE = Zinc.THREE;
 
+const PhysicsOptions = function (
+  dynamic,
+  translation,
+  rotation,
+  collider,
+  rigidBody,
+  softCcdPrediction,
+  contactSkin,
+) {
+  return {
+    dynamic,
+    translation,
+    rotation,
+    collider,
+    rigidBody,
+    softCcdPrediction,
+    contactSkin,
+  };
+};
 
-const PhysicsOptions = function( dynamic, translation, rotation,
-    collider, rigidBody, softCcdPrediction, contactSkin) {
-    return {
-        dynamic,
-        translation,
-        rotation,
-        collider,
-        rigidBody,
-        softCcdPrediction,
-        contactSkin
-    };
-}
-
-const JointOptions = function( type, axis, limits, anchor, contactsEnabled) {
-    return {
-        type,
-        axis,
-        limits,
-        anchor,
-        contactsEnabled
-    };
-}
+const JointOptions = function (type, axis, limits, anchor, contactsEnabled) {
+  return {
+    type,
+    axis,
+    limits,
+    anchor,
+    contactsEnabled,
+  };
+};
 
 // Floors/walls use trimesh colliders, which deformables can't collide against,
 // so each also records this thin analytic box proxy (see getColliderShapes).
 const FLOOR_PROXY_HALF_THICKNESS = 0.02;
 
-const PhyZinc = function() {
-    this.rapier = undefined;
-    this.renderer = undefined;
-    this.physicsWorld = undefined;
-    let gravity = -9.81;
-    const objects = [];
-    const joints = [];
-    // Deformable instances (e.g. ClothPatch) stepped alongside Rapier; see
-    // physics/deformable.js for the interface PhyZinc relies on.
-    const deformables = [];
-    // Lights added by addSpotLight(), removed again by dispose().
-    const lights = [];
-    let simulationStarted = false;
-    const addedObjectCallbacks = [];
-    const downloadCompletedCallbacks = [];
-    let paused = false;
-    let dragState = null;
-    let dragListenersAttached = false;
-    const keyDownCallbacks = [];
-    // Last mouse position over the canvas, in document (client) coordinates;
-    // null until the mouse first moves over it. Used by shootSphere().
-    let lastPointer = null;
-    let keyDownListener = null;
+const PhyZinc = function () {
+  this.rapier = undefined;
+  this.renderer = undefined;
+  this.physicsWorld = undefined;
+  let gravity = -9.81;
+  const objects = [];
+  const joints = [];
+  // Deformable instances (e.g. ClothPatch) stepped alongside Rapier; see
+  // physics/deformable.js for the interface PhyZinc relies on.
+  const deformables = [];
+  // Lights added by addSpotLight(), removed again by dispose().
+  const lights = [];
+  let simulationStarted = false;
+  const addedObjectCallbacks = [];
+  const downloadCompletedCallbacks = [];
+  let paused = false;
+  let dragState = null;
+  let dragListenersAttached = false;
+  const keyDownCallbacks = [];
+  // Last mouse position over the canvas, in document (client) coordinates;
+  // null until the mouse first moves over it. Used by shootSphere().
+  let lastPointer = null;
+  let keyDownListener = null;
 
-    this.setGravity = g => {
-        gravity = g;
+  this.setGravity = (g) => {
+    gravity = g;
+  };
+
+  this.getPhysicsWorld = () => {
+    if (!this.physicsWorld) {
+      let gravityIn = new THREE.Vector3(0.0, 0.0, gravity);
+      this.physicsWorld = new this.rapier.World(gravityIn);
     }
+    return this.physicsWorld;
+  };
 
-    this.getPhysicsWorld = () => {
-        if (!this.physicsWorld) {
-            let gravityIn = new THREE.Vector3(0.0, 0.0, gravity);
-            this.physicsWorld = new this.rapier.World(gravityIn);
+  this.initialise = async () => {
+    if (!this.rapier) {
+      this.rapier = await getRapier();
+    }
+    return this.rapier;
+  };
+
+  // Shadows only show once a shadow-casting light exists (see addSpotLight).
+  // Traverses the morph because Zinc renders a transparent mesh (e.g. the
+  // floor) as the morph drawing back faces plus a child mesh drawing front
+  // faces, and the child needs the flags too.
+  const setShadows = (zincObject, cast, receive) => {
+    zincObject.getMorph()?.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = cast;
+        child.receiveShadow = receive;
+      }
+    });
+  };
+
+  // Adds a shadow-casting THREE.SpotLight to the current scene and turns on
+  // the renderer's shadow maps. Call before startSimulation(): materials
+  // compiled before shadows are enabled won't pick them up. Positions are in
+  // world space; shadowNear/shadowFar bound the light's shadow camera, so keep
+  // them tight around the scene to avoid acne. Returns the light.
+  this.addSpotLight = (options) => {
+    if (!this.renderer) {
+      console.error('addSpotLight needs attach() to have been called first.');
+      return;
+    }
+    const {
+      position = [0, 0, 3],
+      target = [0, 0, 0],
+      color = 0xffffff,
+      intensity = 5,
+      angle = Math.PI / 6,
+      penumbra = 0.3,
+      distance = 0,
+      decay = 2,
+      castShadow = true,
+      shadowMapSize = 1024,
+      shadowNear = 0.1,
+      shadowFar = 10,
+      shadowBias = -0.0005,
+    } = options ?? {};
+    const shadowMap = this.renderer.getThreeJSRenderer().shadowMap;
+    shadowMap.enabled = true;
+    shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const light = new THREE.SpotLight(color, intensity, distance, angle, penumbra, decay);
+    light.position.set(...position);
+    light.target.position.set(...target);
+    light.castShadow = castShadow;
+    light.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+    light.shadow.camera.near = shadowNear;
+    light.shadow.camera.far = shadowFar;
+    light.shadow.bias = shadowBias;
+    // The target must be in the scene so its world matrix stays up to date;
+    // otherwise the light keeps pointing at the origin.
+    const scene = this.renderer.getCurrentScene();
+    scene.addObject(light);
+    scene.addObject(light.target);
+    lights.push({ light, scene });
+    return light;
+  };
+
+  this.addGeometry = (geometry, material, name) => {
+    const scene = this.renderer.getCurrentScene();
+    const zincObject = new Zinc.Geometry();
+    zincObject.setName(name);
+    zincObject.createMesh(geometry, material, {
+      opacity: 1.0,
+      localTimeEnabled: false,
+      localMorphColour: false,
+    });
+    zincObject.isPhyZincsObject = true;
+    setShadows(zincObject, true, true);
+    scene.addZincObject(zincObject);
+    return zincObject;
+  };
+
+  this.addMesh = (mesh, name) => {
+    const scene = this.renderer.getCurrentScene();
+    const zincObject = new Zinc.Geometry();
+    zincObject.setName(name);
+    zincObject.setMesh(mesh, false, false);
+    zincObject.isPhyZincsObject = true;
+    setShadows(zincObject, true, true);
+    scene.addZincObject(zincObject);
+    return zincObject;
+  };
+
+  // Adds a deformable (GPU-simulated) object's mesh to the scene and steps it
+  // after each Rapier step, feeding it the current rigid colliders first.
+  this.addDeformable = (deformable, name) => {
+    if (!(deformable instanceof Deformable)) {
+      console.error('addDeformable expects a Deformable (see physics/deformable.js)');
+      return;
+    }
+    const zincObject = this.addMesh(deformable.mesh, name);
+    deformables.push(deformable);
+    return zincObject;
+  };
+
+  // Every deformable added with addDeformable(), in the order added.
+  this.getDeformables = () => [...deformables];
+
+  // Face planes of a convex-hull collider, in its local frame, as a flat
+  // [nx, ny, nz, d, ...] array (n outward, n·p = d on the face). One plane per
+  // triangle, with coplanar triangles of the same face merged.
+  const computeHullPlanes = (collider) => {
+    const vertices = collider.vertices();
+    const indices = collider.indices();
+    if (!vertices || !indices) return undefined;
+    const vertex = (i) => new THREE.Vector3().fromArray(vertices, i * 3);
+    const centroid = new THREE.Vector3();
+    const vertexCount = vertices.length / 3;
+    for (let i = 0; i < vertexCount; i++) centroid.add(vertex(i));
+    centroid.divideScalar(vertexCount);
+    const planes = [];
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    for (let i = 0; i < indices.length; i += 3) {
+      const a = vertex(indices[i]);
+      ab.subVectors(vertex(indices[i + 1]), a);
+      ac.subVectors(vertex(indices[i + 2]), a);
+      const n = ab.clone().cross(ac);
+      if (n.lengthSq() < 1e-20) continue; // degenerate triangle
+      n.normalize();
+      let d = n.dot(a);
+      if (n.dot(centroid) > d) {
+        n.negate();
+        d = -d;
+      }
+      const duplicate = planes.some((p) => p.n.dot(n) > 1 - 1e-4 && Math.abs(p.d - d) < 1e-5);
+      if (!duplicate) planes.push({ n, d });
+    }
+    return new Float32Array(planes.flatMap(({ n, d }) => [n.x, n.y, n.z, d]));
+  };
+
+  // World-space analytic shapes of every collider a deformable can collide
+  // against: Rapier balls, cuboids, capsules and convex hulls, plus floor
+  // proxies. Trimesh colliders are not included.
+  this.getColliderShapes = () => {
+    const shapes = [];
+    objects.forEach((zincObject) => {
+      if (zincObject.analyticShape) {
+        shapes.push(zincObject.analyticShape);
+        return;
+      }
+      const collider = zincObject.worldCollider;
+      if (!this.rapier || !collider) return;
+      const shapeType = collider.shapeType();
+      const ShapeType = this.rapier.ShapeType;
+      let shape;
+      if (shapeType === ShapeType.Ball) {
+        shape = { type: 'sphere', radius: collider.radius() };
+      } else if (shapeType === ShapeType.Cuboid) {
+        const h = collider.halfExtents();
+        shape = { type: 'box', halfExtents: [h.x, h.y, h.z] };
+      } else if (shapeType === ShapeType.Capsule) {
+        shape = { type: 'capsule', halfHeight: collider.halfHeight(), radius: collider.radius() };
+      } else if (shapeType === ShapeType.ConvexPolyhedron) {
+        // The hull never changes, so its planes are computed once.
+        if (zincObject.hullPlanes === undefined) {
+          zincObject.hullPlanes = computeHullPlanes(collider) ?? null;
         }
-        return this.physicsWorld;
-    }
+        if (!zincObject.hullPlanes) return;
+        shape = { type: 'convexHull', planes: zincObject.hullPlanes };
+      } else {
+        return;
+      }
+      const t = collider.translation();
+      const r = collider.rotation();
+      const v = zincObject.rigidBody.linvel();
+      shape.position = [t.x, t.y, t.z];
+      shape.rotation = [r.x, r.y, r.z, r.w];
+      shape.linearVelocity = [v.x, v.y, v.z];
+      // Lets deformables with collision feedback push back on the body.
+      shape.rigidBody = zincObject.rigidBody;
+      shapes.push(shape);
+    });
+    return shapes;
+  };
 
-    this.initialise = async () => {
-        if (!this.rapier) {
-            this.rapier = await getRapier();
+  // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
+  this.addSphere = (position, radius, widthSegments, heightSegments, density = 1.0) => {
+    if (this.rapier) {
+      const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
+      const material = new THREE.MeshPhongNodeMaterial({
+        color: new THREE.Color('rgb(255, 215, 0)'),
+      });
+      //geometry.translate(position[0], position[1], position[2]);
+      const zincObject = this.addGeometry(geometry, material, 'balls');
+      if (zincObject) {
+        const world = this.getPhysicsWorld();
+        const rbDesc = this.rapier.RigidBodyDesc.dynamic()
+          .setTranslation(position[0], position[1], position[2])
+          .setLinearDamping(0.1);
+        const rigidBody = world.createRigidBody(rbDesc);
+        const collider = this.rapier.ColliderDesc.ball(radius)
+          .setDensity(density)
+          .setFriction(0.1)
+          .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
+          // .setTranslation(0, 0, 0)
+          .setRestitution(0.6)
+          .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
+        const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
+        this.addPhysicsToObject(zincObject, options);
+      }
+      return zincObject;
+    } else {
+      console.error('Physics engine is not ready yet.');
+    }
+  };
+
+  // Launches a sphere from the camera's eye position toward the point under
+  // the mouse at `speed` (world units per second); toward the camera target
+  // if the mouse hasn't been over the canvas yet. Returns its zincObject.
+  this.shootSphere = (radius, speed, density = 1.0) => {
+    const zincCameraControl = this.renderer?.getCurrentScene()?.getZincCameraControls();
+    const camera = zincCameraControl?.cameraObject;
+    if (!camera) return undefined;
+    const direction = new THREE.Vector3();
+    if (lastPointer) {
+      const mouse = zincCameraControl.getNDCFromDocumentCoords(lastPointer.x, lastPointer.y);
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      direction.copy(raycaster.ray.direction);
+    } else if (camera.target) {
+      direction.subVectors(camera.target, camera.position);
+    }
+    if (direction.lengthSq() === 0) return undefined;
+    direction.normalize();
+    const eye = camera.position;
+    const zincObject = this.addSphere([eye.x, eye.y, eye.z], radius, 16, 16, density);
+    zincObject?.rigidBody?.setLinvel(
+      {
+        x: direction.x * speed,
+        y: direction.y * speed,
+        z: direction.z * speed,
+      },
+      true,
+    );
+    return zincObject;
+  };
+
+  // Removes an object added with addSphere/addBox/addPhysicsToObject from both
+  // the physics world and the scene.
+  this.removeObject = (zincObject) => {
+    const index = objects.indexOf(zincObject);
+    if (index !== -1) objects.splice(index, 1);
+    if (zincObject.rigidBody) {
+      if (dragState?.rigidBody === zincObject.rigidBody) dragState = null;
+      // Also removes the colliders attached to the body.
+      this.physicsWorld?.removeRigidBody(zincObject.rigidBody);
+      delete zincObject.rigidBody;
+      delete zincObject.worldCollider;
+    }
+    this.renderer?.getCurrentScene()?.removeZincObject(zincObject);
+  };
+
+  // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
+  this.addBox = (position, dimension, density = 1.0) => {
+    if (this.rapier) {
+      const geometry = new THREE.BoxGeometry(...dimension);
+      const material = new THREE.MeshPhongNodeMaterial({
+        color: new THREE.Color('rgb(0, 0, 200)'),
+      });
+      //geometry.translate(position[0], position[1], position[2]);
+      const zincObject = this.addGeometry(geometry, material, 'box');
+      if (zincObject) {
+        const world = this.getPhysicsWorld();
+        const rbDesc = this.rapier.RigidBodyDesc.dynamic()
+          .setTranslation(position[0], position[1], position[2])
+          .setLinearDamping(0.1);
+        const rigidBody = world.createRigidBody(rbDesc);
+        const collider = this.rapier.ColliderDesc.cuboid(
+          dimension[0] / 2,
+          dimension[1] / 2,
+          dimension[2] / 2,
+        )
+          .setDensity(density)
+          .setFriction(0.1)
+          .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
+          .setRestitution(0.2)
+          .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
+        const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
+        this.addPhysicsToObject(zincObject, options);
+      }
+      return zincObject;
+    } else {
+      console.error('Physics engine is not ready yet.');
+    }
+  };
+
+  this.addFloor = (position, dimension, rotation) => {
+    if (this.rapier) {
+      const geometry = new THREE.PlaneGeometry(dimension[0], dimension[1]);
+      const material = new THREE.MeshPhongNodeMaterial({
+        color: new THREE.Color('rgb(124, 252, 0)'),
+        opacity: 0.5,
+        transparent: true,
+      });
+      if (rotation) {
+        geometry.rotateX(rotation[0]);
+        geometry.rotateY(rotation[1]);
+        geometry.rotateZ(rotation[2]);
+      }
+      geometry.translate(position[0], position[1], position[2]);
+      const zincObject = this.addGeometry(geometry, material, 'floor');
+      setShadows(zincObject, false, true);
+      const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
+      this.addPhysicsToObject(zincObject, options);
+      // Same rotation order as the geometry above: X, then Y, then Z.
+      const [rx, ry, rz] = rotation ?? [0, 0, 0];
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'ZYX'));
+      zincObject.analyticShape = {
+        type: 'box',
+        position: [...position],
+        rotation: [q.x, q.y, q.z, q.w],
+        halfExtents: [dimension[0] / 2, dimension[1] / 2, FLOOR_PROXY_HALF_THICKNESS],
+        linearVelocity: [0, 0, 0],
+      };
+      return zincObject;
+    } else {
+      console.error('Physics engine is not ready yet.');
+    }
+  };
+
+  this.addWalls = (floorPosition, floorDimension, wallHeight) => {
+    const halfX = floorDimension[0] / 2;
+    const halfY = floorDimension[1] / 2;
+    const wallZ = floorPosition[2] + wallHeight / 2;
+
+    // North/South walls: perpendicular to Y, spanning the floor's X edge
+    this.addFloor(
+      [floorPosition[0], floorPosition[1] + halfY, wallZ],
+      [floorDimension[0], wallHeight],
+      [Math.PI / 2, 0, 0],
+    );
+    this.addFloor(
+      [floorPosition[0], floorPosition[1] - halfY, wallZ],
+      [floorDimension[0], wallHeight],
+      [Math.PI / 2, 0, 0],
+    );
+
+    // East/West walls: perpendicular to X, spanning the floor's Y edge
+    this.addFloor(
+      [floorPosition[0] + halfX, floorPosition[1], wallZ],
+      [wallHeight, floorDimension[1]],
+      [0, Math.PI / 2, 0],
+    );
+    this.addFloor(
+      [floorPosition[0] - halfX, floorPosition[1], wallZ],
+      [wallHeight, floorDimension[1]],
+      [0, Math.PI / 2, 0],
+    );
+  };
+
+  const createDynamicCollider = (vertices, indices) => {
+    let collider = this.rapier.ColliderDesc.convexHull(vertices);
+    if (!collider) {
+      console.warn('convexHull failed (degenerate geometry), falling back to trimesh collider');
+      collider = this.rapier.ColliderDesc.trimesh(vertices, indices);
+    }
+    return collider;
+  };
+
+  const computeJointAnchor = (objectA, objectB) => {
+    const boxOf = (zincObject) => {
+      const geometry = zincObject.getMorph().geometry;
+      if (!geometry.boundingBox) {
+        geometry.computeBoundingBox();
+      }
+      return geometry.boundingBox;
+    };
+    const boxA = boxOf(objectA);
+    const boxB = boxOf(objectB);
+    const overlap = boxA.clone().intersect(boxB);
+    if (!overlap.isEmpty()) {
+      return overlap.getCenter(new THREE.Vector3());
+    }
+    const centerA = boxA.getCenter(new THREE.Vector3());
+    const centerB = boxB.getCenter(new THREE.Vector3());
+    return centerA.add(centerB).multiplyScalar(0.5);
+  };
+
+  // Copies the rigid body's translation/rotation (as enabled by physicsT/
+  // physicsR) onto the object's mesh.
+  const syncMorphToRigidBody = (target) => {
+    if (!target.isZincObject) return;
+    const morph = target.getMorph();
+    if (target.physicsT) {
+      const t = target.rigidBody.translation();
+      morph.position.set(t.x, t.y, t.z);
+    }
+    if (target.physicsR) {
+      const r = target.rigidBody.rotation();
+      morph.quaternion.set(r.x, r.y, r.z, r.w);
+    }
+  };
+
+  this.addPhysicsToObject = (zincObject, options) => {
+    if (this.rapier) {
+      if (zincObject && zincObject.isGeometry) {
+        const morph = zincObject.getMorph();
+        const geometry = morph.geometry;
+        const vertices = geometry.attributes.position.array;
+        const indices = geometry.index.array;
+        try {
+          const world = this.getPhysicsWorld();
+          let collider = options.collider
+            ? options.collider
+            : options.dynamic
+              ? createDynamicCollider(vertices, indices)
+              : this.rapier.ColliderDesc.trimesh(vertices, indices);
+          collider.setContactSkin(options.contactSkin);
+          zincObject.collider = collider;
+          let rigidBody = options.rigidBody;
+          if (options.dynamic) {
+            zincObject.getMorph().matrixAutoUpdate = true;
+            zincObject.rigidBody = rigidBody
+              ? rigidBody
+              : world.createRigidBody(this.rapier.RigidBodyDesc.dynamic());
+          } else {
+            zincObject.rigidBody = rigidBody
+              ? rigidBody
+              : world.createRigidBody(this.rapier.RigidBodyDesc.fixed());
+          }
+          zincObject.rigidBody.setSoftCcdPrediction(options.softCcdPrediction);
+          zincObject.worldCollider = world.createCollider(
+            zincObject.collider,
+            zincObject.rigidBody,
+          );
+          zincObject.physicsT = options.translation;
+          zincObject.physicsR = options.rotation;
+          syncMorphToRigidBody(zincObject);
+          objects.push(zincObject);
+        } catch {
+          console.error('unable to add physics to zincObject');
         }
-        return this.rapier;
+      }
     }
+  };
 
-    // Shadows only show once a shadow-casting light exists (see addSpotLight).
-    // Traverses the morph because Zinc renders a transparent mesh (e.g. the
-    // floor) as the morph drawing back faces plus a child mesh drawing front
-    // faces, and the child needs the flags too.
-    const setShadows = (zincObject, cast, receive) => {
-        zincObject.getMorph()?.traverse(child => {
-            if (child.isMesh) {
-                child.castShadow = cast;
-                child.receiveShadow = receive;
-            }
-        });
+  this.addJoint = (objectA, objectB, options) => {
+    if (this.rapier && objectA && objectB && objectA.rigidBody && objectB.rigidBody) {
+      const world = this.getPhysicsWorld();
+      const anchor = options.anchor ? options.anchor : computeJointAnchor(objectA, objectB);
+      const jointData =
+        options.type === 'revolute'
+          ? this.rapier.JointData.revolute(
+              anchor,
+              anchor,
+              new THREE.Vector3(options.axis[0], options.axis[1], options.axis[2]),
+            )
+          : this.rapier.JointData.spherical(anchor, anchor);
+      const joint = world.createImpulseJoint(jointData, objectA.rigidBody, objectB.rigidBody, true);
+      if (options.type === 'revolute' && options.limits) {
+        joint.setLimits(options.limits[0], options.limits[1]);
+      }
+      joint.setContactsEnabled(
+        options.contactsEnabled === undefined ? false : options.contactsEnabled,
+      );
+      joints.push(joint);
+      return joint;
+    } else {
+      console.error('unable to add joint between zincObjects');
     }
+  };
 
-    // Adds a shadow-casting THREE.SpotLight to the current scene and turns on
-    // the renderer's shadow maps. Call before startSimulation(): materials
-    // compiled before shadows are enabled won't pick them up. Positions are in
-    // world space; shadowNear/shadowFar bound the light's shadow camera, so keep
-    // them tight around the scene to avoid acne. Returns the light.
-    this.addSpotLight = (options) => {
-        if (!this.renderer) {
-            console.error("addSpotLight needs attach() to have been called first.");
-            return;
-        }
-        const {
-            position = [0, 0, 3], target = [0, 0, 0], color = 0xffffff, intensity = 5,
-            angle = Math.PI / 6, penumbra = 0.3, distance = 0, decay = 2,
-            castShadow = true, shadowMapSize = 1024, shadowNear = 0.1, shadowFar = 10,
-            shadowBias = -0.0005
-        } = options ?? {};
-        const shadowMap = this.renderer.getThreeJSRenderer().shadowMap;
-        shadowMap.enabled = true;
-        shadowMap.type = THREE.PCFSoftShadowMap;
-
-        const light = new THREE.SpotLight(color, intensity, distance, angle, penumbra, decay);
-        light.position.set(...position);
-        light.target.position.set(...target);
-        light.castShadow = castShadow;
-        light.shadow.mapSize.set(shadowMapSize, shadowMapSize);
-        light.shadow.camera.near = shadowNear;
-        light.shadow.camera.far = shadowFar;
-        light.shadow.bias = shadowBias;
-        // The target must be in the scene so its world matrix stays up to date;
-        // otherwise the light keeps pointing at the origin.
-        const scene = this.renderer.getCurrentScene();
-        scene.addObject(light);
-        scene.addObject(light.target);
-        lights.push({ light, scene });
-        return light;
-    }
-
-    this.addGeometry = (geometry, material, name) => {
-        const scene = this.renderer.getCurrentScene();
-        const zincObject = new Zinc.Geometry();
-        zincObject.setName(name);
-        zincObject.createMesh(
-            geometry,
-            material,
-            {
-                opacity: 1.0,
-                localTimeEnabled: false,
-                localMorphColour: false
-
-            }
-        );
-        zincObject.isPhyZincsObject = true;
+  const objectAddedCallback = () => {
+    return (zincObject) => {
+      if (!zincObject.isPhyZincsObject) {
+        // Objects loaded by Zinc (loadGLTF/importZincMetadata) bypass
+        // addGeometry/addMesh, so give them shadows here.
         setShadows(zincObject, true, true);
-        scene.addZincObject(zincObject);
-        return zincObject;
-    }
-
-    this.addMesh = (mesh, name) => {
-        const scene = this.renderer.getCurrentScene();
-        const zincObject = new Zinc.Geometry();
-        zincObject.setName(name);
-        zincObject.setMesh(mesh, false, false);
-        zincObject.isPhyZincsObject = true;
-        setShadows(zincObject, true, true);
-        scene.addZincObject(zincObject);
-        return zincObject;
-    }
-
-    // Adds a deformable (GPU-simulated) object's mesh to the scene and steps it
-    // after each Rapier step, feeding it the current rigid colliders first.
-    this.addDeformable = (deformable, name) => {
-        if (!(deformable instanceof Deformable)) {
-            console.error("addDeformable expects a Deformable (see physics/deformable.js)");
-            return;
-        }
-        const zincObject = this.addMesh(deformable.mesh, name);
-        deformables.push(deformable);
-        return zincObject;
-    }
-
-    // Every deformable added with addDeformable(), in the order added.
-    this.getDeformables = () => [...deformables];
-
-    // Face planes of a convex-hull collider, in its local frame, as a flat
-    // [nx, ny, nz, d, ...] array (n outward, n·p = d on the face). One plane per
-    // triangle, with coplanar triangles of the same face merged.
-    const computeHullPlanes = (collider) => {
-        const vertices = collider.vertices();
-        const indices = collider.indices();
-        if (!vertices || !indices) return undefined;
-        const vertex = (i) => new THREE.Vector3().fromArray(vertices, i * 3);
-        const centroid = new THREE.Vector3();
-        const vertexCount = vertices.length / 3;
-        for (let i = 0; i < vertexCount; i++) centroid.add(vertex(i));
-        centroid.divideScalar(vertexCount);
-        const planes = [];
-        const ab = new THREE.Vector3();
-        const ac = new THREE.Vector3();
-        for (let i = 0; i < indices.length; i += 3) {
-            const a = vertex(indices[i]);
-            ab.subVectors(vertex(indices[i + 1]), a);
-            ac.subVectors(vertex(indices[i + 2]), a);
-            const n = ab.clone().cross(ac);
-            if (n.lengthSq() < 1e-20) continue; // degenerate triangle
-            n.normalize();
-            let d = n.dot(a);
-            if (n.dot(centroid) > d) {
-                n.negate();
-                d = -d;
-            }
-            const duplicate = planes.some(p =>
-                p.n.dot(n) > 1 - 1e-4 && Math.abs(p.d - d) < 1e-5);
-            if (!duplicate) planes.push({ n, d });
-        }
-        return new Float32Array(planes.flatMap(({ n, d }) => [n.x, n.y, n.z, d]));
-    }
-
-    // World-space analytic shapes of every collider a deformable can collide
-    // against: Rapier balls, cuboids, capsules and convex hulls, plus floor
-    // proxies. Trimesh colliders are not included.
-    this.getColliderShapes = () => {
-        const shapes = [];
-        objects.forEach(zincObject => {
-            if (zincObject.analyticShape) {
-                shapes.push(zincObject.analyticShape);
-                return;
-            }
-            const collider = zincObject.worldCollider;
-            if (!this.rapier || !collider) return;
-            const shapeType = collider.shapeType();
-            const ShapeType = this.rapier.ShapeType;
-            let shape;
-            if (shapeType === ShapeType.Ball) {
-                shape = { type: 'sphere', radius: collider.radius() };
-            } else if (shapeType === ShapeType.Cuboid) {
-                const h = collider.halfExtents();
-                shape = { type: 'box', halfExtents: [h.x, h.y, h.z] };
-            } else if (shapeType === ShapeType.Capsule) {
-                shape = { type: 'capsule', halfHeight: collider.halfHeight(), radius: collider.radius() };
-            } else if (shapeType === ShapeType.ConvexPolyhedron) {
-                // The hull never changes, so its planes are computed once.
-                if (zincObject.hullPlanes === undefined) {
-                    zincObject.hullPlanes = computeHullPlanes(collider) ?? null;
-                }
-                if (!zincObject.hullPlanes) return;
-                shape = { type: 'convexHull', planes: zincObject.hullPlanes };
-            } else {
-                return;
-            }
-            const t = collider.translation();
-            const r = collider.rotation();
-            const v = zincObject.rigidBody.linvel();
-            shape.position = [t.x, t.y, t.z];
-            shape.rotation = [r.x, r.y, r.z, r.w];
-            shape.linearVelocity = [v.x, v.y, v.z];
-            // Lets deformables with collision feedback push back on the body.
-            shape.rigidBody = zincObject.rigidBody;
-            shapes.push(shape);
+        addedObjectCallbacks.forEach((callback) => {
+          callback(zincObject);
         });
-        return shapes;
+      }
+    };
+  };
+
+  this.addObjectAddedCallback = (callback) => {
+    if (callback && typeof callback === 'function') {
+      addedObjectCallbacks.push(callback);
     }
+  };
 
-    // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
-    this.addSphere = (position, radius, widthSegments, heightSegments, density = 1.0) => {
-        if (this.rapier) {
-            const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
-            const material = new THREE.MeshPhongNodeMaterial({
-                color: new THREE.Color("rgb(255, 215, 0)")
-            });
-            //geometry.translate(position[0], position[1], position[2]);
-            const zincObject = this.addGeometry(geometry, material, "balls");
-            if (zincObject) {
-                const world = this.getPhysicsWorld();
-                const rbDesc = this.rapier.RigidBodyDesc.dynamic()
-                    .setTranslation(position[0], position[1], position[2])
-                    .setLinearDamping(0.1);
-                const rigidBody = world.createRigidBody(rbDesc);
-                const collider = this.rapier.ColliderDesc.ball(radius)
-                    .setDensity(density)
-                    .setFriction(0.1)
-                    .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
-                    // .setTranslation(0, 0, 0)
-                    .setRestitution(0.6)
-                    .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
-                const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
-                this.addPhysicsToObject(zincObject, options);
-            }
-            return zincObject;
-        } else {
-            console.error("Physics engine is not ready yet.");
-        }
+  this.addDownloadCompletedCallback = (callback) => {
+    if (callback && typeof callback === 'function') {
+      downloadCompletedCallbacks.push(callback);
     }
+  };
 
-    // Launches a sphere from the camera's eye position toward the point under
-    // the mouse at `speed` (world units per second); toward the camera target
-    // if the mouse hasn't been over the canvas yet. Returns its zincObject.
-    this.shootSphere = (radius, speed, density = 1.0) => {
-        const zincCameraControl = this.renderer?.getCurrentScene()?.getZincCameraControls();
-        const camera = zincCameraControl?.cameraObject;
-        if (!camera) return undefined;
-        const direction = new THREE.Vector3();
-        if (lastPointer) {
-            const mouse = zincCameraControl.getNDCFromDocumentCoords(lastPointer.x, lastPointer.y);
-            const raycaster = new THREE.Raycaster();
-            raycaster.setFromCamera(mouse, camera);
-            direction.copy(raycaster.ray.direction);
-        } else if (camera.target) {
-            direction.subVectors(camera.target, camera.position);
+  const _pickingCallback = function () {
+    return function (intersects, window_x, window_y) {};
+  };
+
+  const _hoverCallback = function () {
+    return function (intersects, window_x, window_y) {};
+  };
+
+  // Casts a ray under the mouse (leaving it in raycaster.ray) and returns the
+  // nearest dynamic rigid body hit, if any.
+  const pickDraggableObject = (scene, zincCameraControl, raycaster, mouse, event) => {
+    zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
+    raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
+    if (!this.rapier) return undefined;
+    const hits = raycaster.intersectObjects(scene.getPickableThreeJSObjects(), true);
+    return hits.find(
+      (hit) =>
+        hit.object?.userData?.isZincObject &&
+        hit.object.userData.rigidBody?.bodyType() === this.rapier.RigidBodyType.Dynamic,
+    );
+  };
+
+  this.enableDragging = () => {
+    if (!this.renderer || dragListenersAttached) return;
+    dragListenersAttached = true;
+
+    const domElement = this.renderer.getThreeJSRenderer().domElement;
+    const scene = this.renderer.getCurrentScene();
+    const zincCameraControl = scene.getZincCameraControls();
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const currentPoint = new THREE.Vector3();
+
+    const onMouseDown = (event) => {
+      const rigidHit = pickDraggableObject(scene, zincCameraControl, raycaster, mouse, event);
+
+      // Deformables aren't raycastable meshes, so each picks itself; the
+      // candidate nearest the camera (rigid or deformable) wins.
+      let deformableHit = null;
+      let hitDeformable = null;
+      deformables.forEach((deformable) => {
+        if (!deformable.isPickingEnabled()) return;
+        const hit = deformable.pick(raycaster.ray);
+        if (hit && (!deformableHit || hit.distance < deformableHit.distance)) {
+          deformableHit = hit;
+          hitDeformable = deformable;
         }
-        if (direction.lengthSq() === 0) return undefined;
-        direction.normalize();
-        const eye = camera.position;
-        const zincObject = this.addSphere([eye.x, eye.y, eye.z], radius, 16, 16, density);
-        zincObject?.rigidBody?.setLinvel({
-            x: direction.x * speed, y: direction.y * speed, z: direction.z * speed,
-        }, true);
-        return zincObject;
-    }
+      });
+      const useDeformable =
+        deformableHit && (!rigidHit || deformableHit.distance < rigidHit.distance);
+      if (!useDeformable && !rigidHit) return;
 
-    // Removes an object added with addSphere/addBox/addPhysicsToObject from both
-    // the physics world and the scene.
-    this.removeObject = (zincObject) => {
-        const index = objects.indexOf(zincObject);
-        if (index !== -1) objects.splice(index, 1);
-        if (zincObject.rigidBody) {
-            if (dragState?.rigidBody === zincObject.rigidBody) dragState = null;
-            // Also removes the colliders attached to the body.
-            this.physicsWorld?.removeRigidBody(zincObject.rigidBody);
-            delete zincObject.rigidBody;
-            delete zincObject.worldCollider;
-        }
-        this.renderer?.getCurrentScene()?.removeZincObject(zincObject);
-    }
+      zincCameraControl.disable();
 
-    // density: kg/m³ (mass = density × volume). Defaults to Rapier's 1.0.
-    this.addBox = (position, dimension, density = 1.0) => {
-        if (this.rapier) {
-            const geometry = new THREE.BoxGeometry(...dimension);
-            const material = new THREE.MeshPhongNodeMaterial({
-                color: new THREE.Color("rgb(0, 0, 200)")
-            });
-            //geometry.translate(position[0], position[1], position[2]);
-            const zincObject = this.addGeometry(geometry, material, "box");
-            if (zincObject) {
-                const world = this.getPhysicsWorld();
-                const rbDesc = this.rapier.RigidBodyDesc.dynamic()
-                    .setTranslation(position[0], position[1], position[2])
-                    .setLinearDamping(0.1);
-                const rigidBody = world.createRigidBody(rbDesc);
-                const collider = this.rapier.ColliderDesc
-                    .cuboid(dimension[0] / 2, dimension[1] / 2, dimension[2] / 2)
-                    .setDensity(density)
-                    .setFriction(0.1)
-                    .setFrictionCombineRule(this.rapier.CoefficientCombineRule.Max)
-                    .setRestitution(0.2)
-                    .setRestitutionCombineRule(this.rapier.CoefficientCombineRule.Max);
-                const options = PhysicsOptions(true, true, false, collider, rigidBody, 0.0, 0.0);
-                this.addPhysicsToObject(zincObject, options);
-            }
-            return zincObject;
-        } else {
-            console.error("Physics engine is not ready yet.");
-        }
-    }
+      const grabPoint = (useDeformable ? deformableHit.point : rigidHit.point).clone();
+      const cameraDirection = new THREE.Vector3();
+      zincCameraControl.cameraObject.getWorldDirection(cameraDirection);
+      const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(cameraDirection, grabPoint);
 
-    this.addFloor = (position, dimension, rotation) => {
-        if (this.rapier) {
-            const geometry = new THREE.PlaneGeometry(dimension[0], dimension[1]);
-            const material = new THREE.MeshPhongNodeMaterial({
-                color: new THREE.Color("rgb(124, 252, 0)"),
-                opacity: 0.5,
-                transparent: true,
+      dragState = {
+        grabPoint,
+        dragPlane,
+        lastPoint: grabPoint.clone(),
+        lastTime: performance.now(),
+        velocity: new THREE.Vector3(),
+      };
 
-            });
-            if (rotation) {
-                geometry.rotateX(rotation[0]);
-                geometry.rotateY(rotation[1]);
-                geometry.rotateZ(rotation[2]);
-            }
-            geometry.translate(position[0], position[1], position[2]);
-            const zincObject = this.addGeometry(geometry, material, "floor");
-            setShadows(zincObject, false, true);
-            const options = PhysicsOptions(false, false, false, undefined, undefined, 1.0, 0.0);
-            this.addPhysicsToObject(zincObject, options);
-            // Same rotation order as the geometry above: X, then Y, then Z.
-            const [rx, ry, rz] = rotation ?? [0, 0, 0];
-            const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'ZYX'));
-            zincObject.analyticShape = {
-                type: 'box',
-                position: [...position],
-                rotation: [q.x, q.y, q.z, q.w],
-                halfExtents: [dimension[0] / 2, dimension[1] / 2, FLOOR_PROXY_HALF_THICKNESS],
-                linearVelocity: [0, 0, 0],
-            };
-            return zincObject;
-        } else {
-            console.error("Physics engine is not ready yet.");
-        }
-    }
-
-    this.addWalls = (floorPosition, floorDimension, wallHeight) => {
-        const halfX = floorDimension[0] / 2;
-        const halfY = floorDimension[1] / 2;
-        const wallZ = floorPosition[2] + wallHeight / 2;
-
-        // North/South walls: perpendicular to Y, spanning the floor's X edge
-        this.addFloor([floorPosition[0], floorPosition[1] + halfY, wallZ],
-            [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
-        this.addFloor([floorPosition[0], floorPosition[1] - halfY, wallZ],
-            [floorDimension[0], wallHeight], [Math.PI / 2, 0, 0]);
-
-        // East/West walls: perpendicular to X, spanning the floor's Y edge
-        this.addFloor([floorPosition[0] + halfX, floorPosition[1], wallZ],
-            [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
-        this.addFloor([floorPosition[0] - halfX, floorPosition[1], wallZ],
-            [wallHeight, floorDimension[1]], [0, Math.PI / 2, 0]);
-    }
-
-    const createDynamicCollider = (vertices, indices) => {
-        let collider = this.rapier.ColliderDesc.convexHull(vertices);
-        if (!collider) {
-            console.warn("convexHull failed (degenerate geometry), falling back to trimesh collider");
-            collider = this.rapier.ColliderDesc.trimesh(vertices, indices);
-        }
-        return collider;
-    }
-
-    const computeJointAnchor = (objectA, objectB) => {
-        const boxOf = (zincObject) => {
-            const geometry = zincObject.getMorph().geometry;
-            if (!geometry.boundingBox) {
-                geometry.computeBoundingBox();
-            }
-            return geometry.boundingBox;
-        }
-        const boxA = boxOf(objectA);
-        const boxB = boxOf(objectB);
-        const overlap = boxA.clone().intersect(boxB);
-        if (!overlap.isEmpty()) {
-            return overlap.getCenter(new THREE.Vector3());
-        }
-        const centerA = boxA.getCenter(new THREE.Vector3());
-        const centerB = boxB.getCenter(new THREE.Vector3());
-        return centerA.add(centerB).multiplyScalar(0.5);
-    }
-
-    // Copies the rigid body's translation/rotation (as enabled by physicsT/
-    // physicsR) onto the object's mesh.
-    const syncMorphToRigidBody = (target) => {
-        if (!target.isZincObject) return;
-        const morph = target.getMorph();
-        if (target.physicsT) {
-            const t = target.rigidBody.translation();
-            morph.position.set(t.x, t.y, t.z);
-        }
-        if (target.physicsR) {
-            const r = target.rigidBody.rotation();
-            morph.quaternion.set(r.x, r.y, r.z, r.w);
-        }
-    }
-
-    this.addPhysicsToObject = (zincObject, options) => {
-        if (this.rapier) {
-            if (zincObject && zincObject.isGeometry) {
-                const morph = zincObject.getMorph();
-                const geometry = morph.geometry;
-                const vertices = geometry.attributes.position.array;
-                const indices = geometry.index.array;
-                try {
-                    const world = this.getPhysicsWorld();
-                    let collider = options.collider ? options.collider
-                        : options.dynamic ? createDynamicCollider(vertices, indices)
-                        : this.rapier.ColliderDesc.trimesh(vertices, indices);
-                    collider.setContactSkin(options.contactSkin);
-                    zincObject.collider = collider;
-                    let rigidBody = options.rigidBody;
-                    if (options.dynamic) {
-                        zincObject.getMorph().matrixAutoUpdate = true;
-                        zincObject.rigidBody = rigidBody ? 
-                            rigidBody : world.createRigidBody(
-                                this.rapier.RigidBodyDesc.dynamic());
-                    } else {
-                        zincObject.rigidBody = rigidBody ?
-                            rigidBody: world.createRigidBody(
-                                this.rapier.RigidBodyDesc.fixed());
-                    }
-                    zincObject.rigidBody.setSoftCcdPrediction(
-                        options.softCcdPrediction);
-                    zincObject.worldCollider = world.createCollider(
-                        zincObject.collider, zincObject.rigidBody);
-                    zincObject.physicsT = options.translation;
-                    zincObject.physicsR = options.rotation;
-                    syncMorphToRigidBody(zincObject);
-                    objects.push(zincObject);
-                }
-                catch {
-                    console.error("unable to add physics to zincObject");
-                }
-            }
-        }
-    }
-
-    this.addJoint = (objectA, objectB, options) => {
-        if (this.rapier && objectA && objectB && objectA.rigidBody && objectB.rigidBody) {
-            const world = this.getPhysicsWorld();
-            const anchor = options.anchor ? options.anchor : computeJointAnchor(objectA, objectB);
-            const jointData = options.type === "revolute" ?
-                this.rapier.JointData.revolute(anchor, anchor,
-                    new THREE.Vector3(options.axis[0], options.axis[1], options.axis[2])) :
-                this.rapier.JointData.spherical(anchor, anchor);
-            const joint = world.createImpulseJoint(
-                jointData, objectA.rigidBody, objectB.rigidBody, true);
-            if (options.type === "revolute" && options.limits) {
-                joint.setLimits(options.limits[0], options.limits[1]);
-            }
-            joint.setContactsEnabled(
-                options.contactsEnabled === undefined ? false : options.contactsEnabled);
-            joints.push(joint);
-            return joint;
-        } else {
-            console.error("unable to add joint between zincObjects");
-        }
-    }
-
-    const objectAddedCallback = () => {
-        return (zincObject) => {
-            if (!zincObject.isPhyZincsObject) {
-                // Objects loaded by Zinc (loadGLTF/importZincMetadata) bypass
-                // addGeometry/addMesh, so give them shadows here.
-                setShadows(zincObject, true, true);
-                addedObjectCallbacks.forEach(callback => {
-                    callback(zincObject);
-                })
-            }
-        }
-    }
-
-    this.addObjectAddedCallback = (callback) => {
-        if (callback && (typeof callback === "function")) {
-            addedObjectCallbacks.push(callback);
-        }
-    }
-
-    this.addDownloadCompletedCallback = (callback) => {
-        if (callback && (typeof callback === "function")) {
-            downloadCompletedCallbacks.push(callback);
-        }
-    }
-
-    const _pickingCallback = function() {
-		return function(intersects, window_x, window_y) {
-
-        }
-    }
-
-    const _hoverCallback = function() {
-		return function(intersects, window_x, window_y) {
-
-
-        }
-    }
-
-    // Casts a ray under the mouse (leaving it in raycaster.ray) and returns the
-    // nearest dynamic rigid body hit, if any.
-    const pickDraggableObject = (scene, zincCameraControl, raycaster, mouse, event) => {
-        zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
-        raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
-        if (!this.rapier) return undefined;
-        const hits = raycaster.intersectObjects(scene.getPickableThreeJSObjects(), true);
-        return hits.find(hit =>
-            hit.object?.userData?.isZincObject &&
-            hit.object.userData.rigidBody?.bodyType() === this.rapier.RigidBodyType.Dynamic);
-    }
-
-    this.enableDragging = () => {
-        if (!this.renderer || dragListenersAttached) return;
-        dragListenersAttached = true;
-
-        const domElement = this.renderer.getThreeJSRenderer().domElement;
-        const scene = this.renderer.getCurrentScene();
-        const zincCameraControl = scene.getZincCameraControls();
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-        const currentPoint = new THREE.Vector3();
-
-        const onMouseDown = (event) => {
-            const rigidHit = pickDraggableObject(scene, zincCameraControl, raycaster, mouse, event);
-
-            // Deformables aren't raycastable meshes, so each picks itself; the
-            // candidate nearest the camera (rigid or deformable) wins.
-            let deformableHit = null;
-            let hitDeformable = null;
-            deformables.forEach(deformable => {
-                if (!deformable.isPickingEnabled()) return;
-                const hit = deformable.pick(raycaster.ray);
-                if (hit && (!deformableHit || hit.distance < deformableHit.distance)) {
-                    deformableHit = hit;
-                    hitDeformable = deformable;
-                }
-            });
-            const useDeformable = deformableHit &&
-                (!rigidHit || deformableHit.distance < rigidHit.distance);
-            if (!useDeformable && !rigidHit) return;
-
-            zincCameraControl.disable();
-
-            const grabPoint = (useDeformable ? deformableHit.point : rigidHit.point).clone();
-            const cameraDirection = new THREE.Vector3();
-            zincCameraControl.cameraObject.getWorldDirection(cameraDirection);
-            const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
-                cameraDirection, grabPoint);
-
-            dragState = {
-                grabPoint,
-                dragPlane,
-                lastPoint: grabPoint.clone(),
-                lastTime: performance.now(),
-                velocity: new THREE.Vector3(),
-            };
-
-            if (useDeformable) {
-                dragState.deformable = hitDeformable;
-                dragState.startTranslation = grabPoint.clone();
-                hitDeformable.grab(deformableHit);
-            } else {
-                const rigidBody = rigidHit.object.userData.rigidBody;
-                const t = rigidBody.translation();
-                dragState.rigidBody = rigidBody;
-                dragState.originalBodyType = rigidBody.bodyType();
-                dragState.startTranslation = new THREE.Vector3(t.x, t.y, t.z);
-                rigidBody.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
-            }
-        }
-
-        const onMouseMove = (event) => {
-            if (!dragState) return;
-
-            zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
-            raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
-            if (!raycaster.ray.intersectPlane(dragState.dragPlane, currentPoint)) return;
-
-            const newPosition = dragState.startTranslation.clone()
-                .add(currentPoint).sub(dragState.grabPoint);
-
-            const now = performance.now();
-            const dt = Math.max((now - dragState.lastTime) / 1000, 1e-4);
-            dragState.velocity.copy(currentPoint).sub(dragState.lastPoint).divideScalar(dt);
-            dragState.lastPoint.copy(currentPoint);
-            dragState.lastTime = now;
-
-            if (dragState.deformable) {
-                dragState.deformable.moveGrab(newPosition);
-            } else {
-                dragState.rigidBody.setNextKinematicTranslation(newPosition);
-            }
-        }
-
-        const onMouseUp = () => {
-            if (dragState) {
-                if (dragState.deformable) {
-                    dragState.deformable.release();
-                } else {
-                    dragState.rigidBody.setBodyType(dragState.originalBodyType, true);
-                    dragState.rigidBody.setLinvel(dragState.velocity, true);
-                }
-                dragState = null;
-            }
-            zincCameraControl.enable();
-        }
-
-        // Capture phase so this runs before zincjs's own camera mousedown
-        // listener (registered earlier, at camera-control creation). Otherwise
-        // the camera records a rotate state on the first click, disable() then
-        // removes its mouseup so that state is never cleared, and the view
-        // tumbles after the drag ends.
-        domElement.addEventListener('mousedown', onMouseDown, { capture: true });
-        domElement.addEventListener('mousemove', onMouseMove);
-        domElement.addEventListener('mouseup', onMouseUp);
-        domElement.addEventListener('mouseleave', onMouseUp);
-    }
-
-    const downloadCompletedCallback = () => {
-        return () => {
-            downloadCompletedCallbacks.forEach(callback => {
-                callback();
-            })
-            this.startSimulation();
-            const scene = this.renderer.getCurrentScene();
-            const zincCameraControl = scene.getZincCameraControls();
-			//zincCameraControl.enableRaycaster(scene, _pickingCallback(), _hoverCallback());
-            scene.viewAll();
-        }
-    }
-
-    // Starts the render loop and per-frame physics stepping. Called
-    // automatically once a gltf/metadata download completes; call it directly
-    // for scenes built only from primitives and deformables.
-    // Frame rate counter: counts rendered frames and reports the average rate
-    // over each FRAME_RATE_WINDOW_MS window. Its pre-render callback is only
-    // registered the first time it's enabled, and does nothing while disabled.
-    const FRAME_RATE_WINDOW_MS = 500;
-    const frameRateCallbacks = [];
-    const frameRateState = {
-        enabled: false, registered: false, frames: 0, windowStart: 0, rate: 0,
+      if (useDeformable) {
+        dragState.deformable = hitDeformable;
+        dragState.startTranslation = grabPoint.clone();
+        hitDeformable.grab(deformableHit);
+      } else {
+        const rigidBody = rigidHit.object.userData.rigidBody;
+        const t = rigidBody.translation();
+        dragState.rigidBody = rigidBody;
+        dragState.originalBodyType = rigidBody.bodyType();
+        dragState.startTranslation = new THREE.Vector3(t.x, t.y, t.z);
+        rigidBody.setBodyType(this.rapier.RigidBodyType.KinematicPositionBased, true);
+      }
     };
 
-    const countFrame = () => {
-        if (!frameRateState.enabled) return;
-        const now = performance.now();
-        frameRateState.frames++;
-        const elapsed = now - frameRateState.windowStart;
-        if (elapsed >= FRAME_RATE_WINDOW_MS) {
-            frameRateState.rate = frameRateState.frames * 1000 / elapsed;
-            frameRateState.frames = 0;
-            frameRateState.windowStart = now;
-            frameRateCallbacks.forEach(callback => callback(frameRateState.rate));
-        }
-    }
+    const onMouseMove = (event) => {
+      if (!dragState) return;
 
-    this.setFrameRateCounterEnabled = (enabled) => {
-        if (enabled && !frameRateState.registered && this.renderer) {
-            this.renderer.addPreRenderCallbackFunction(countFrame);
-            frameRateState.registered = true;
-        }
-        if (enabled && !frameRateState.enabled) {
-            // Start a fresh window so time spent disabled isn't averaged in.
-            frameRateState.frames = 0;
-            frameRateState.windowStart = performance.now();
-        }
-        frameRateState.enabled = enabled;
-        if (!enabled) frameRateState.rate = 0;
-    }
+      zincCameraControl.getNDCFromDocumentCoords(event.clientX, event.clientY, mouse);
+      raycaster.setFromCamera(mouse, zincCameraControl.cameraObject);
+      if (!raycaster.ray.intersectPlane(dragState.dragPlane, currentPoint)) return;
 
-    this.isFrameRateCounterEnabled = () => frameRateState.enabled;
+      const newPosition = dragState.startTranslation
+        .clone()
+        .add(currentPoint)
+        .sub(dragState.grabPoint);
 
-    // Frames per second over the last window; 0 while disabled or before the
-    // first window completes.
-    this.getFrameRate = () => frameRateState.rate;
+      const now = performance.now();
+      const dt = Math.max((now - dragState.lastTime) / 1000, 1e-4);
+      dragState.velocity.copy(currentPoint).sub(dragState.lastPoint).divideScalar(dt);
+      dragState.lastPoint.copy(currentPoint);
+      dragState.lastTime = now;
 
-    // callback(framesPerSecond), called after each window while enabled.
-    this.addFrameRateCallback = (callback) => {
-        if (callback && (typeof callback === "function")) {
-            frameRateCallbacks.push(callback);
-        }
-    }
+      if (dragState.deformable) {
+        dragState.deformable.moveGrab(newPosition);
+      } else {
+        dragState.rigidBody.setNextKinematicTranslation(newPosition);
+      }
+    };
 
-    this.startSimulation = () => {
-        if (!this.renderer || simulationStarted) return;
-        simulationStarted = true;
-        this.renderer.addPreRenderCallbackFunction(updatePhysicalWorld());
-        this.renderer.playAnimation = true;
-        this.renderer.animate();
-        this.enableDragging();
-    }
-
-    // Two-way coupling: forces deformables applied to rigid bodies. Only
-    // dynamic bodies respond; kinematic (e.g. being dragged) and fixed ones don't.
-    const applyDeformableImpulses = () => {
-        const Dynamic = this.rapier.RigidBodyType.Dynamic;
-        deformables.forEach(deformable => {
-            if (!deformable.isCollisionFeedbackEnabled()) return;
-            deformable.takeColliderImpulses().forEach(({ rigidBody, impulse, torque }) => {
-                if (!rigidBody.isValid() || rigidBody.bodyType() !== Dynamic) return;
-                rigidBody.applyImpulse({ x: impulse[0], y: impulse[1], z: impulse[2] }, true);
-                rigidBody.applyTorqueImpulse({ x: torque[0], y: torque[1], z: torque[2] }, true);
-            });
-        });
-    }
-
-    const updatePhysicalWorld = () => {
-        return () => {
-            if (paused) return;
-            if (this.physicsWorld) {
-                applyDeformableImpulses();
-                this.physicsWorld.step();
-                objects.forEach(syncMorphToRigidBody);
-            }
-            if (deformables.length > 0) {
-                const shapes = this.getColliderShapes();
-                deformables.forEach(deformable => {
-                    deformable.setColliders(shapes);
-                    deformable.step();
-                });
-            }
-        }
-    }
-
-    // Calls callback(event) for every keydown on the window, except while
-    // typing in a text field or with a button focused (where Space/Enter
-    // already mean something). The listener is removed by dispose().
-    this.addKeyDownCallback = (callback) => {
-        keyDownCallbacks.push(callback);
-        if (keyDownListener) return;
-        keyDownListener = (event) => {
-            if (event.target instanceof Element &&
-                event.target.closest('input, textarea, select, button, [contenteditable="true"], [role="button"], [role="combobox"]')) {
-                return;
-            }
-            keyDownCallbacks.forEach(cb => cb(event));
-        };
-        window.addEventListener('keydown', keyDownListener);
-    }
-
-    this.pause = (flag) => {
-        paused = flag;
-    }
-
-    this.isPaused = () => {
-        return paused;
-    }
-
-    this.startNewScene = sceneName => {
-        if (this.renderer) {
-            const scene = this.renderer.createScene(sceneName);
-            scene.addZincObjectAddedCallbacks(objectAddedCallback());
-            this.renderer.setCurrentScene(scene);
-            return scene;
-        }
-    }
-
-    this.importZincMetadata = (url) => {
-        if (this.isReady()) {
-            if (this.renderer) {
-                const scene = this.renderer.getCurrentScene();
-                scene.loadMetadataURL(url, undefined,
-                    downloadCompletedCallback());
-            }
+    const onMouseUp = () => {
+      if (dragState) {
+        if (dragState.deformable) {
+          dragState.deformable.release();
         } else {
-            console.error("Physics engine is not ready yet.")
+          dragState.rigidBody.setBodyType(dragState.originalBodyType, true);
+          dragState.rigidBody.setLinvel(dragState.velocity, true);
         }
-    }
+        dragState = null;
+      }
+      zincCameraControl.enable();
+    };
 
-    this.loadGLTF = (url) => {
-        if (this.isReady()) {
-            if (this.renderer) {
-                const scene = this.renderer.getCurrentScene();
-                scene.loadGLTF(url, undefined, downloadCompletedCallback());
-            }
-        } else {
-            console.error("Physics engine is not ready yet.")
-        }
-    }
+    // Capture phase so this runs before zincjs's own camera mousedown
+    // listener (registered earlier, at camera-control creation). Otherwise
+    // the camera records a rotate state on the first click, disable() then
+    // removes its mouseup so that state is never cleared, and the view
+    // tumbles after the drag ends.
+    domElement.addEventListener('mousedown', onMouseDown, { capture: true });
+    domElement.addEventListener('mousemove', onMouseMove);
+    domElement.addEventListener('mouseup', onMouseUp);
+    domElement.addEventListener('mouseleave', onMouseUp);
+  };
 
-    this.attach = async (renderer) => {
-        this.renderer = renderer;
-        await this.renderer.initialiseVisualisation();
-        this.renderer.playAnimation = false;
-        // No cleanup needed: the canvas, and so the listener, is discarded on dispose.
-        this.renderer.getThreeJSRenderer().domElement.addEventListener('mousemove', (event) => {
-            lastPointer = { x: event.clientX, y: event.clientY };
+  const downloadCompletedCallback = () => {
+    return () => {
+      downloadCompletedCallbacks.forEach((callback) => {
+        callback();
+      });
+      this.startSimulation();
+      const scene = this.renderer.getCurrentScene();
+      const zincCameraControl = scene.getZincCameraControls();
+      //zincCameraControl.enableRaycaster(scene, _pickingCallback(), _hoverCallback());
+      scene.viewAll();
+    };
+  };
+
+  // Starts the render loop and per-frame physics stepping. Called
+  // automatically once a gltf/metadata download completes; call it directly
+  // for scenes built only from primitives and deformables.
+  // Frame rate counter: counts rendered frames and reports the average rate
+  // over each FRAME_RATE_WINDOW_MS window. Its pre-render callback is only
+  // registered the first time it's enabled, and does nothing while disabled.
+  const FRAME_RATE_WINDOW_MS = 500;
+  const frameRateCallbacks = [];
+  const frameRateState = {
+    enabled: false,
+    registered: false,
+    frames: 0,
+    windowStart: 0,
+    rate: 0,
+  };
+
+  const countFrame = () => {
+    if (!frameRateState.enabled) return;
+    const now = performance.now();
+    frameRateState.frames++;
+    const elapsed = now - frameRateState.windowStart;
+    if (elapsed >= FRAME_RATE_WINDOW_MS) {
+      frameRateState.rate = (frameRateState.frames * 1000) / elapsed;
+      frameRateState.frames = 0;
+      frameRateState.windowStart = now;
+      frameRateCallbacks.forEach((callback) => callback(frameRateState.rate));
+    }
+  };
+
+  this.setFrameRateCounterEnabled = (enabled) => {
+    if (enabled && !frameRateState.registered && this.renderer) {
+      this.renderer.addPreRenderCallbackFunction(countFrame);
+      frameRateState.registered = true;
+    }
+    if (enabled && !frameRateState.enabled) {
+      // Start a fresh window so time spent disabled isn't averaged in.
+      frameRateState.frames = 0;
+      frameRateState.windowStart = performance.now();
+    }
+    frameRateState.enabled = enabled;
+    if (!enabled) frameRateState.rate = 0;
+  };
+
+  this.isFrameRateCounterEnabled = () => frameRateState.enabled;
+
+  // Frames per second over the last window; 0 while disabled or before the
+  // first window completes.
+  this.getFrameRate = () => frameRateState.rate;
+
+  // callback(framesPerSecond), called after each window while enabled.
+  this.addFrameRateCallback = (callback) => {
+    if (callback && typeof callback === 'function') {
+      frameRateCallbacks.push(callback);
+    }
+  };
+
+  this.startSimulation = () => {
+    if (!this.renderer || simulationStarted) return;
+    simulationStarted = true;
+    this.renderer.addPreRenderCallbackFunction(updatePhysicalWorld());
+    this.renderer.playAnimation = true;
+    this.renderer.animate();
+    this.enableDragging();
+  };
+
+  // Two-way coupling: forces deformables applied to rigid bodies. Only
+  // dynamic bodies respond; kinematic (e.g. being dragged) and fixed ones don't.
+  const applyDeformableImpulses = () => {
+    const Dynamic = this.rapier.RigidBodyType.Dynamic;
+    deformables.forEach((deformable) => {
+      if (!deformable.isCollisionFeedbackEnabled()) return;
+      deformable.takeColliderImpulses().forEach(({ rigidBody, impulse, torque }) => {
+        if (!rigidBody.isValid() || rigidBody.bodyType() !== Dynamic) return;
+        rigidBody.applyImpulse({ x: impulse[0], y: impulse[1], z: impulse[2] }, true);
+        rigidBody.applyTorqueImpulse({ x: torque[0], y: torque[1], z: torque[2] }, true);
+      });
+    });
+  };
+
+  const updatePhysicalWorld = () => {
+    return () => {
+      if (paused) return;
+      if (this.physicsWorld) {
+        applyDeformableImpulses();
+        this.physicsWorld.step();
+        objects.forEach(syncMorphToRigidBody);
+      }
+      if (deformables.length > 0) {
+        const shapes = this.getColliderShapes();
+        deformables.forEach((deformable) => {
+          deformable.setColliders(shapes);
+          deformable.step();
         });
-    }
+      }
+    };
+  };
 
-    this.isReady = () => {
-        return this.rapier !== undefined;
-    }
+  // Calls callback(event) for every keydown on the window, except while
+  // typing in a text field or with a button focused (where Space/Enter
+  // already mean something). The listener is removed by dispose().
+  this.addKeyDownCallback = (callback) => {
+    keyDownCallbacks.push(callback);
+    if (keyDownListener) return;
+    keyDownListener = (event) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          'input, textarea, select, button, [contenteditable="true"], [role="button"], [role="combobox"]',
+        )
+      ) {
+        return;
+      }
+      keyDownCallbacks.forEach((cb) => cb(event));
+    };
+    window.addEventListener('keydown', keyDownListener);
+  };
 
-    this.dispose = () => {
-        objects.forEach(object => {
-            delete object.worldCollider;
-            delete object.hullPlanes;
-        });
-        objects.length = 0;
-        joints.length = 0;
-        if (keyDownListener) {
-            window.removeEventListener('keydown', keyDownListener);
-            keyDownListener = null;
-        }
-        keyDownCallbacks.length = 0;
-        deformables.forEach(deformable => deformable.dispose());
-        frameRateState.enabled = false;
-        frameRateCallbacks.length = 0;
-        deformables.length = 0;
-        lights.forEach(({ light, scene }) => {
-            scene.removeObject(light.target);
-            scene.removeObject(light);
-            light.dispose();
-        });
-        lights.length = 0;
-        this.physicsWorld = undefined;
-        if (this.renderer) {
-            this.renderer.dispose();
-        }
+  this.pause = (flag) => {
+    paused = flag;
+  };
+
+  this.isPaused = () => {
+    return paused;
+  };
+
+  this.startNewScene = (sceneName) => {
+    if (this.renderer) {
+      const scene = this.renderer.createScene(sceneName);
+      scene.addZincObjectAddedCallbacks(objectAddedCallback());
+      this.renderer.setCurrentScene(scene);
+      return scene;
     }
-}
+  };
+
+  this.importZincMetadata = (url) => {
+    if (this.isReady()) {
+      if (this.renderer) {
+        const scene = this.renderer.getCurrentScene();
+        scene.loadMetadataURL(url, undefined, downloadCompletedCallback());
+      }
+    } else {
+      console.error('Physics engine is not ready yet.');
+    }
+  };
+
+  this.loadGLTF = (url) => {
+    if (this.isReady()) {
+      if (this.renderer) {
+        const scene = this.renderer.getCurrentScene();
+        scene.loadGLTF(url, undefined, downloadCompletedCallback());
+      }
+    } else {
+      console.error('Physics engine is not ready yet.');
+    }
+  };
+
+  this.attach = async (renderer) => {
+    this.renderer = renderer;
+    await this.renderer.initialiseVisualisation();
+    this.renderer.playAnimation = false;
+    // No cleanup needed: the canvas, and so the listener, is discarded on dispose.
+    this.renderer.getThreeJSRenderer().domElement.addEventListener('mousemove', (event) => {
+      lastPointer = { x: event.clientX, y: event.clientY };
+    });
+  };
+
+  this.isReady = () => {
+    return this.rapier !== undefined;
+  };
+
+  this.dispose = () => {
+    objects.forEach((object) => {
+      delete object.worldCollider;
+      delete object.hullPlanes;
+    });
+    objects.length = 0;
+    joints.length = 0;
+    if (keyDownListener) {
+      window.removeEventListener('keydown', keyDownListener);
+      keyDownListener = null;
+    }
+    keyDownCallbacks.length = 0;
+    deformables.forEach((deformable) => deformable.dispose());
+    frameRateState.enabled = false;
+    frameRateCallbacks.length = 0;
+    deformables.length = 0;
+    lights.forEach(({ light, scene }) => {
+      scene.removeObject(light.target);
+      scene.removeObject(light);
+      light.dispose();
+    });
+    lights.length = 0;
+    this.physicsWorld = undefined;
+    if (this.renderer) {
+      this.renderer.dispose();
+    }
+  };
+};
 
 export { PhyZinc, PhysicsOptions, JointOptions };
